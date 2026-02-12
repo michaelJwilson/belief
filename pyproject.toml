@@ -1,0 +1,87 @@
+[project]
+name = "belief"
+version = "0.1.0"
+description = ""
+authors = [{ name = "M. J. Wilson", email = "mjwilson@princeton.edu" }]
+requires-python = ">=3.12.2"
+readme = "README.md"
+dependencies = [
+    "numpy>=1.26.0,<2",
+    "matplotlib",
+    "scipy",
+    "scikit-learn",
+    "pytest>=8.3.5,<9",
+    "ruff>=0.9.9,<0.10",
+    "black>=25.1.0",
+    "maturin>=1.8.3",
+    "numba>=0.61.0",
+    "rich==14.0.0",
+    "torch>=2.6.0",
+    "hatch>=1.14.1",
+    "tensorboard>=2.19.0",
+    "torchinfo>=1.8.0",
+    "pyyaml>=6.0.2",
+]
+
+[project.scripts]
+run_model = "belief.scripts.run_belief:main"
+
+[tool.hatch.build.targets.sdist]
+include = ["python/belief"]
+
+[tool.hatch.build.targets.wheel]
+include = ["python/belief"]
+
+[tool.hatch.build.targets.wheel.sources]
+"python/belief" = "belief"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff.lint]
+ignore = [
+  "G004", # f-string in logger                                                                                                                                                                                           
+  "T201", # print statements                                                                                                                                                                                              
+  "PLR2004", # magic value in assert                                                                                                                                                                                      
+  "NPY002", # legacy numpy calls                                                                                                                                                                                          
+  "ANN",  # Ignore all type annotation rules                                                                                                                                                                              
+  "I002",  # Ignore the rule that requires `from __future__ import annotations`                                                                                                                                           
+]
+
+extend-select = [
+  "B",           # flake8-bugbear
+  "I",           # isort
+  "ARG",         # flake8-unused-arguments
+  "C4",          # flake8-comprehensions
+  "EM",          # flake8-errmsg
+  "ICN",         # flake8-import-conventions
+  "ISC",         # flake8-implicit-str-concat
+  "G",           # flake8-logging-format
+  "PGH",         # pygrep-hooks
+  "PIE",         # flake8-pie
+  "PL",          # pylint
+  "PT",          # flake8-pytest-style
+  "PTH",         # flake8-use-pathlib
+  "RET",         # flake8-return
+  "RUF",         # Ruff-specific
+  "SIM",         # flake8-simplify
+  "T20",         # flake8-print
+  "UP",          # pyupgrade
+  "YTT",         # flake8-2020
+  "EXE",         # flake8-executable
+  "NPY",         # NumPy specific rules
+  "PD",          # pandas-vet
+]
+extend-ignore = [
+  "PLR09",    # Too many <...>
+  "ISC001",   # Conflicts with formatter
+]
+unfixable = [
+  "T20",  # Removes print statements
+  "F841", # Removes unused variables
+]
+isort.required-imports = ["from __future__ import annotations"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ALL"]

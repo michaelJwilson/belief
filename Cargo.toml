@@ -1,0 +1,71 @@
+[package]
+name = "belief"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+serde-1 = [
+    "serde/derive",
+    "ndarray/serde-1",
+]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[dependencies]
+rayon = ">1.5"
+
+# NB openblas by default; 
+nalgebra = { version = "0.33.2" }
+
+# NB "rayon", "serde-1"
+ndarray = { version = ">=0.16", features = ["blas", "matrixmultiply-threading"] }
+# ndarray-linalg = { version="0.17.0", features = ["openblas"]}
+
+rand = "0.10.0"
+# rand_distr = ">0.4"
+# rand_chacha = ">0.3"
+# spectral = "0.6.0"
+serde = { version = ">1.0.116", optional = true }
+# statrs = "0.18.0"
+# petgraph = { version = "0.8.1", features = ["rayon"] }
+# rustc-hash = "2.1.1"
+# pprof = { version = ">0.11", features = ["flamegraph"] }
+log = "0.4"
+# num-traits = "0.2.19"
+# image = "0.24"
+# itertools = "0.11"
+# smallvec = "1.10"
+# lru = "0.7"
+# dfdx = "0.11.0"
+# burn = "0.17.1"
+
+# argmin = "0.10.0"
+# argmin-math = { version = "0.4", features = ["ndarray_latest", "nalgebra_latest"] }
+# argmin_testfunctions = "0.2.0"
+# argmin-observer-slog = "0.1.0"
+
+GSL = "7.0"
+env_logger = "0.11.8"
+
+[dev-dependencies]
+approx = ">0.4"
+criterion = ">0.4"
+
+[profile.dev]
+# NB The Rust compiler splits crates into multiple codegen units to parallelize
+# (and thus speed up) compilation. However, this might cause it to miss some potential
+# optimizations.
+# codegen-units = 1
+# opt-level = 3
+# lto = "fat"
+overflow-checks = true
+
+[profile.release]
+codegen-units = 1
+opt-level = 3
+lto = true
+overflow-checks = false
+# panic = "abort"
+
+# NB "target-cpu=arm64"; "target-cpu=native".
+[build]
+rustflags = ["-C", "target-cpu=native -Awarnings --cfg debug_statements"]
