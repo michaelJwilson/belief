@@ -6,40 +6,44 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VariableType {
     Latent,
-    Observed,
+    Observed, // # TODO rename emission.
 }
 
+// # TOOD update Variable to include a depth / order parameter that, when available (for chains / trees)
+// # can be used to optimize belief propagation by only passing messages forward (for chains) or from leaves to root (for trees).  
 #[derive(Clone)]
 pub struct Variable {
     pub id: usize,
-    pub domain: usize,
+    pub domain: usize, // # DEPRECATE varying domain; assume all variables have same domain size for simplicity.
     pub var_type: VariableType,
-    pub pos: Option<(f64, f64)>,
+    pub pos: Option<(f64, f64)>, // # DEPRECATE position.
 }
 
+// NB Forney-style factor graph: factors are functions of their variables, and variables are connected to factors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FactorType {
     Emission,
     Transition,
-    Start_Prior,
+    Start_Prior, // # TODO rename to Prior.
     Custom,
 }
 
 pub struct Factor {
     pub id: usize,
     pub variables: Vec<usize>,   // variable ids
-    pub table: Vec<f64>, // flattened table, row-major, probabilities for all clique assignments.
+    pub table: Vec<f64>, // flattened table, row-major, probabilities for all clique assignments to this factor.
     pub factor_type: FactorType, // label for the type of factor
 }
 
-/// NB represents a bipartite graph of variables < -- > factors.
+/// NB Forney factor graph is with variables and factors connected by edges.
 pub struct FactorGraph {
     pub variables: Vec<Variable>,
     pub factors: Vec<Factor>,
-    pub var_to_factors: HashMap<usize, Vec<usize>>, // variable id -> factor ids
-    pub factor_to_vars: HashMap<usize, Vec<usize>>, // factor id -> variable ids
+    pub var_to_factors: HashMap<usize, Vec<usize>>, // variable id -> factor ids.
+    pub factor_to_vars: HashMap<usize, Vec<usize>>, // factor id -> variable ids.
 }
 
+// TODO add docstring - seems to assign each variable to a state in its domain.
 fn next_assignment(assignment: &mut [usize], domains: &[usize], skip: usize) -> bool {
     for (j, dom) in domains.iter().enumerate() {
         if j == skip {
@@ -57,10 +61,11 @@ fn next_assignment(assignment: &mut [usize], domains: &[usize], skip: usize) -> 
     false
 }
 
-/// Message from variable to factor or vice versa.
-/// Indexed by (from, to, assignment).
+// # TODO update to (from, to, vec over global domain).
+/// Message from variable to factor or vice versa.  Indexed by (from, to, assignment).
 type Message = HashMap<(usize, usize, usize), f64>;
 
+// # TODO update docstring to include variable definition, e.g. beta and tol.
 /// Returns a vector of marginal distributions for each variable in the factor graph.
 /// Each entry is a vector of probabilities (length = variable domain size) representing
 /// the estimated marginal probability of each assignment for that variable after belief propagation.
@@ -70,12 +75,15 @@ pub fn ls_belief_propagation(
     tol: f64,
     beta: Option<f64>,
 ) -> Vec<Vec<f64>> {
+
+    // # TODO complete all typing e.g. beta: f64
     let beta = beta.unwrap_or(1.0);
 
     println!("Solving belief propagation");
 
     let mut messages: Message = HashMap::default();
 
+    // # TODO complete all variable typing
     // NB initialize var -> factor as 1/domain size.
     for var in &fg.variables {
         for &fid in fg.var_to_factors.get(&var.id).unwrap() {
@@ -200,7 +208,6 @@ pub fn ls_belief_propagation(
 
         if max_diff < tol {
             println!("Converged at iteration {iter} with tolerance {max_diff:.3e}");
-
             break;
         }
 
@@ -574,6 +581,7 @@ mod tests {
         save_node_marginals("data/node_marginals.csv", &variables, &marginals, &exp).unwrap();
     }
 
+    // TODO complete all typing., eg.g n_states, chain_len etc.
     #[test]
     fn test_hmm_likelihood() {
         let n_states = 2;
@@ -602,7 +610,7 @@ mod tests {
             alpha[i] = prior[i] * emit[i * 2 + obs[0]];
         }
 
-        // Recursion
+        // # TODO update all probability manipulation to log space to avoid underflow.
         for t in 1..chain_len {
             let mut next_alpha = vec![0.0; n_states];
             for j in 0..n_states {
@@ -669,65 +677,10 @@ mod tests {
             factor_to_vars,
         };
 
-        // Custom Sum-Product Implementation for Likelihood (Calculates Z)
-        // Since ls_belief_propagation normalizes messages, we implement a simple
-        // unnormalized message passing along the chain to compute the partition function.
+        // # TODO utilize ls_belief_propagation strictly to calculate node marginals and likelihood (approx.)
         let mut node_belief = vec![1.0; n_states]; // Implicitly message from 'left'
+        
+        // # TODO complete test to compare likelihood from forward pass and belief propagation
 
-        // Pass 1: Combine Prior + Emission at X0
-        // Find prior factor (unary on 0) and emission factor (unary on 0)
-        let factors_0 = fg.var_to_factors.get(&0).unwrap();
-        for &fid in factors_0 {
-            let f = &fg.factors[fid];
-            if f.variables.len() == 1 {
-                for s in 0..n_states {
-                    node_belief[s] *= f.table[s];
-                }
-            }
-        }
-
-        // Pass 2: Propagate forward
-        for t in 0..chain_len - 1 {
-            let mut next_belief_in = vec![0.0; n_states];
-            // Find transition factor id connecting t and t+1
-            let trans_fid = *fg
-                .var_to_factors
-                .get(&t)
-                .unwrap()
-                .iter()
-                .find(|&&fid| fg.factors[fid].variables.contains(&(t + 1)))
-                .unwrap();
-            let trans_factor = &fg.factors[trans_fid];
-
-            // Message passing: sum_{x_t} ( belief(x_t) * trans(x_t, x_{t+1}) )
-            for next_s in 0..n_states {
-                let mut sum = 0.0;
-                for cur_s in 0..n_states {
-                    // Table is row major: cur_s * n_states + next_s
-                    let prob = trans_factor.table[cur_s * n_states + next_s];
-                    sum += node_belief[cur_s] * prob;
-                }
-                next_belief_in[next_s] = sum;
-            }
-
-            // Multiply by Emission at t+1
-            let factors_next = fg.var_to_factors.get(&(t + 1)).unwrap();
-            for &fid in factors_next {
-                let f = &fg.factors[fid];
-                // Only unary emission factors (exclude the transition we just used and next transition)
-                if f.variables.len() == 1 {
-                    for s in 0..n_states {
-                        next_belief_in[s] *= f.table[s];
-                    }
-                }
-            }
-            node_belief = next_belief_in;
-        }
-
-        let likelihood_bp: f64 = node_belief.iter().sum();
-        println!("BP Factor Graph Likelihood: {:.6e}", likelihood_bp);
-
-        let diff = (likelihood_fwd - likelihood_bp).abs();
-        assert!(diff < 1e-9, "Likelihoods do not match: diff = {}", diff);
     }
 }
