@@ -103,7 +103,8 @@ pub fn ls_belief_propagation(
 
     println!("Solving belief propagation with beta={:.2}, damping={:.2}", target_beta, damping);
 
-    // Ensure we have a unique ID space for factors in the message map
+    // Variables and Factors may have overlapping IDs (both starting at 0).
+    // To avoid key collisions in the message map, we offset factor IDs.
     let max_var_id = fg.variables.iter().map(|v| v.id).max().unwrap_or(0);
     let factor_offset = max_var_id + 1;
 
@@ -124,7 +125,7 @@ pub fn ls_belief_propagation(
     for var in &fg.variables {
         for &fid in fg.var_to_factors.get(&var.id).unwrap() {
             for s in 0..domain_size {
-                // Key: (VarID, FactorID + offset, State)
+                // Key: (FromID, ToID, State). Factor IDs are offset.
                 messages.insert((var.id, fid + factor_offset, s), init_val);
             }
         }
@@ -134,7 +135,7 @@ pub fn ls_belief_propagation(
     for factor in &fg.factors {
         for &vid in &factor.variables {
             for s in 0..domain_size {
-                // Key: (FactorID + offset, VarID, State)
+                // Key: (FromID, ToID, State).
                 messages.insert((factor.id + factor_offset, vid, s), init_val);
             }
         }
@@ -177,12 +178,12 @@ pub fn ls_belief_propagation(
 
                     for &other_fid in fg.var_to_factors.get(&var.id).unwrap() {
                         if other_fid != fid {
-                            // Read from Factor -> Var
+                            // Read message from Factor -> Var
                             sum_log += messages[&(other_fid + factor_offset, var.id, s)];
                         }
                     }
 
-                    // Write to Var -> Factor
+                    // Write message from Var -> Factor
                     new_messages.insert((var.id, fid + factor_offset, s), sum_log);
                 }
             }
@@ -226,7 +227,7 @@ pub fn ls_belief_propagation(
 
                         for (j, &other_vid) in fvars.iter().enumerate() {
                             if j != i {
-                                // Read from Var -> Factor
+                                // Read message from Var -> Factor
                                 term += messages[&(other_vid, factor.id + factor_offset, current_assignment[j])];
                             }
                         }
@@ -240,7 +241,7 @@ pub fn ls_belief_propagation(
                     }
 
                     let new_val_log = logsumexp(&log_terms);
-                    // Write to Factor -> Var
+                    // Write message from Factor -> Var
                     new_messages.insert((factor.id + factor_offset, vid, s), new_val_log);
                 }
             }
@@ -265,7 +266,7 @@ pub fn ls_belief_propagation(
                         val = init_val;
                     }
 
-                    // Damping
+                    // Damping (on Var -> Factor messages)
                     if damping > 0.0 {
                          let old_val = messages.get(&(var.id, fid + factor_offset, s)).copied().unwrap_or(init_val);
                          val = logsumexp(&[ln_damping + old_val, ln_inv_damping + val]);
@@ -290,7 +291,7 @@ pub fn ls_belief_propagation(
                         val = init_val;
                     }
 
-                    // Damping
+                    // Damping (on Factor -> Var messages)
                     if damping > 0.0 {
                          let old_val = messages.get(&(factor.id + factor_offset, vid, s)).copied().unwrap_or(init_val);
                          val = logsumexp(&[ln_damping + old_val, ln_inv_damping + val]);
@@ -324,7 +325,6 @@ pub fn ls_belief_propagation(
 
         for &fid in fg.var_to_factors.get(&var.id).unwrap() {
             for s in 0..domain_size {
-                // Incoming messages to Var are from Factors
                 marginal[s] += messages[&(fid + factor_offset, var.id, s)];
             }
         }
