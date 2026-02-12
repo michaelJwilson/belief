@@ -103,6 +103,10 @@ pub fn ls_belief_propagation(
 
     println!("Solving belief propagation with beta={:.2}, damping={:.2}", target_beta, damping);
 
+    // Ensure we have a unique ID space for factors in the message map
+    let max_var_id = fg.variables.iter().map(|v| v.id).max().unwrap_or(0);
+    let factor_offset = max_var_id + 1;
+
     // Check if we can use an ordered schedule based on depth
     let use_depth_schedule = fg.variables.iter().all(|v| v.depth.is_some());
     
@@ -120,7 +124,8 @@ pub fn ls_belief_propagation(
     for var in &fg.variables {
         for &fid in fg.var_to_factors.get(&var.id).unwrap() {
             for s in 0..domain_size {
-                messages.insert((var.id, fid, s), init_val);
+                // Key: (VarID, FactorID + offset, State)
+                messages.insert((var.id, fid + factor_offset, s), init_val);
             }
         }
     }
@@ -129,7 +134,8 @@ pub fn ls_belief_propagation(
     for factor in &fg.factors {
         for &vid in &factor.variables {
             for s in 0..domain_size {
-                messages.insert((factor.id, vid, s), init_val);
+                // Key: (FactorID + offset, VarID, State)
+                messages.insert((factor.id + factor_offset, vid, s), init_val);
             }
         }
     }
@@ -171,11 +177,13 @@ pub fn ls_belief_propagation(
 
                     for &other_fid in fg.var_to_factors.get(&var.id).unwrap() {
                         if other_fid != fid {
-                            sum_log += messages[&(other_fid, var.id, s)];
+                            // Read from Factor -> Var
+                            sum_log += messages[&(other_fid + factor_offset, var.id, s)];
                         }
                     }
 
-                    new_messages.insert((var.id, fid, s), sum_log);
+                    // Write to Var -> Factor
+                    new_messages.insert((var.id, fid + factor_offset, s), sum_log);
                 }
             }
         }
@@ -218,7 +226,8 @@ pub fn ls_belief_propagation(
 
                         for (j, &other_vid) in fvars.iter().enumerate() {
                             if j != i {
-                                term += messages[&(other_vid, factor.id, current_assignment[j])];
+                                // Read from Var -> Factor
+                                term += messages[&(other_vid, factor.id + factor_offset, current_assignment[j])];
                             }
                         }
 
@@ -231,7 +240,8 @@ pub fn ls_belief_propagation(
                     }
 
                     let new_val_log = logsumexp(&log_terms);
-                    new_messages.insert((factor.id, vid, s), new_val_log);
+                    // Write to Factor -> Var
+                    new_messages.insert((factor.id + factor_offset, vid, s), new_val_log);
                 }
             }
         }
@@ -243,10 +253,10 @@ pub fn ls_belief_propagation(
         for var in &fg.variables {
             for &fid in fg.var_to_factors.get(&var.id).unwrap() {
                 // Compute norm for this edge (u, v) over all states
-                let log_norm = logsumexp(&(0..domain_size).map(|s| new_messages[&(var.id, fid, s)]).collect::<Vec<_>>());
+                let log_norm = logsumexp(&(0..domain_size).map(|s| new_messages[&(var.id, fid + factor_offset, s)]).collect::<Vec<_>>());
                 
                 for s in 0..domain_size {
-                    let mut val = new_messages[&(var.id, fid, s)];
+                    let mut val = new_messages[&(var.id, fid + factor_offset, s)];
                     
                     // Normalize
                     if log_norm > f64::NEG_INFINITY {
@@ -257,10 +267,10 @@ pub fn ls_belief_propagation(
 
                     // Damping
                     if damping > 0.0 {
-                         let old_val = messages.get(&(var.id, fid, s)).copied().unwrap_or(init_val);
+                         let old_val = messages.get(&(var.id, fid + factor_offset, s)).copied().unwrap_or(init_val);
                          val = logsumexp(&[ln_damping + old_val, ln_inv_damping + val]);
                     }
-                    new_messages.insert((var.id, fid, s), val);
+                    new_messages.insert((var.id, fid + factor_offset, s), val);
                 }
             }
         }
@@ -268,10 +278,10 @@ pub fn ls_belief_propagation(
         // 2. Factor -> Variable edges
         for factor in &fg.factors {
             for &vid in &factor.variables {
-                let log_norm = logsumexp(&(0..domain_size).map(|s| new_messages[&(factor.id, vid, s)]).collect::<Vec<_>>());
+                let log_norm = logsumexp(&(0..domain_size).map(|s| new_messages[&(factor.id + factor_offset, vid, s)]).collect::<Vec<_>>());
                 
                 for s in 0..domain_size {
-                    let mut val = new_messages[&(factor.id, vid, s)];
+                    let mut val = new_messages[&(factor.id + factor_offset, vid, s)];
                     
                     // Normalize
                     if log_norm > f64::NEG_INFINITY {
@@ -282,10 +292,10 @@ pub fn ls_belief_propagation(
 
                     // Damping
                     if damping > 0.0 {
-                         let old_val = messages.get(&(factor.id, vid, s)).copied().unwrap_or(init_val);
+                         let old_val = messages.get(&(factor.id + factor_offset, vid, s)).copied().unwrap_or(init_val);
                          val = logsumexp(&[ln_damping + old_val, ln_inv_damping + val]);
                     }
-                    new_messages.insert((factor.id, vid, s), val);
+                    new_messages.insert((factor.id + factor_offset, vid, s), val);
                 }
             }
         }
@@ -314,7 +324,8 @@ pub fn ls_belief_propagation(
 
         for &fid in fg.var_to_factors.get(&var.id).unwrap() {
             for s in 0..domain_size {
-                marginal[s] += messages[&(fid, var.id, s)];
+                // Incoming messages to Var are from Factors
+                marginal[s] += messages[&(fid + factor_offset, var.id, s)];
             }
         }
 
