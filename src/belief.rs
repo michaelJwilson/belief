@@ -1,54 +1,10 @@
-use rand::prelude::*;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::collections::HashMap;
+use rand::prelude::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VariableType {
-    Latent,
-    Emission,
-}
-#[derive(Clone)]
-pub struct Variable {
-    pub id: usize,
-    pub var_type: VariableType,
-    pub depth: Option<usize>,
-}
-
-// NB Forney-style factor graph: factors are functions of their variables, and variables are connected to factors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FactorType {
-    Emission,
-    Transition,
-    Prior,
-    Custom,
-}
-
-pub struct Factor {
-    pub id: usize,
-    pub variables: Vec<usize>,
-    pub table: Vec<f64>, // flattened table, row-major, log-probabilities for all clique assignments.
-    pub factor_type: FactorType,
-}
-
-/// NB Forney factor graph is with variables and factors connected by edges.
-pub struct FactorGraph {
-    pub variables: Vec<Variable>,
-    pub factors: Vec<Factor>,
-    pub var_to_factors: HashMap<usize, Vec<usize>>, // map: variable id -> factor ids.
-    pub factor_to_vars: HashMap<usize, Vec<usize>>, // map: factor id -> variable ids.
-    pub domain_size: usize,
-}
-
-/// Computes log(sum(exp(x))) in a numerically stable way.
-fn logsumexp(logs: &[f64]) -> f64 {
-    let max = logs.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-    if max == f64::NEG_INFINITY {
-        return f64::NEG_INFINITY;
-    }
-    let sum = logs.iter().map(|&x| (x - max).exp()).sum::<f64>();
-    max + sum.ln()
-}
+use utils::logsumexp;
+use factor_graph::{Variable, VariableType, Factor, FactorType, FactorGraph};
 
 /// Decrements the assignment to the next valid state in the joint domain.
 /// Returns true if a valid assignment was found, false if the sequence wrapped around.
@@ -90,32 +46,32 @@ pub fn ls_belief_propagation(
     beta: Option<f64>,
     damping: Option<f64>,
 ) -> Vec<Vec<f64>> {
+    // NB message sharpening - raising factor potentials to power beta (inverse temperature) before normalization.
+    let domain_size = fg.domain_size;
 
     let target_beta: f64 = beta.unwrap_or(1.0);
-    // Beta starts lower if annealing is implicitly desired via iteration count (typically for loopy graphs)
-    // or if we just want to stabilize early iterations.
     let mut beta = target_beta;
     
     let damping = damping.unwrap_or(0.0);
-    let domain_size = fg.domain_size;
+
     let ln_damping = if damping > 0.0 { damping.ln() } else { f64::NEG_INFINITY };
     let ln_inv_damping = if damping < 1.0 { (1.0 - damping).ln() } else { f64::NEG_INFINITY };
 
     println!("Solving belief propagation with beta={:.2}, damping={:.2}", target_beta, damping);
 
-    // Variables and Factors may have overlapping IDs (both starting at 0).
-    // To avoid key collisions in the message map, we offset factor IDs.
+    // NB variables & Factors may have overlapping ids; offset to avoid collisions.
     let max_var_id = fg.variables.iter().map(|v| v.id).max().unwrap_or(0);
     let factor_offset = max_var_id + 1;
 
-    // Check if we can use an ordered schedule based on depth
-    let use_depth_schedule = fg.variables.iter().all(|v| v.depth.is_some());
+    // Detect if we should use alternating schedule based on presence of priority
+    let use_var_priority = fg.variables.iter().any(|v| v.priority.is_some());
+    let use_factor_priority = fg.factors.iter().any(|f| f.priority.is_some());
     
-    // Create reference to variables sorted by depth for forward/backward passes if available
-    let mut sorted_vars: Vec<&Variable> = fg.variables.iter().collect();
-    if use_depth_schedule {
-        println!("Using depth-based schedule for message passing.");
-        sorted_vars.sort_by_key(|v| v.depth.unwrap());
+    if use_var_priority {
+        println!("Using variable priority-based schedule for message passing (assuming FG sorted).");
+    }
+    if use_factor_priority {
+        println!("Using factor priority-based schedule for message passing (assuming FG sorted).");
     }
 
     let mut messages: Message = HashMap::default();
@@ -157,12 +113,13 @@ pub fn ls_belief_propagation(
         let mut new_messages = messages.clone(); // Shallow clone of map structure, new values inserted
 
         // Define the order of variables for updates
-        let var_iterator: Box<dyn Iterator<Item = &Variable>> = if use_depth_schedule {
+        // We use the order in fg.variables, assuming it has been sorted if desired.
+        let var_iterator: Box<dyn Iterator<Item = &Variable>> = if use_var_priority {
             // Alternating forward/backward passes can speed up convergence in trees/chains
             if iter % 2 == 0 {
-                Box::new(sorted_vars.iter().cloned()) // Forward (low depth to high depth)
+                Box::new(fg.variables.iter()) // Forward
             } else {
-                Box::new(sorted_vars.iter().rev().cloned()) // Backward (high depth to low depth)
+                Box::new(fg.variables.iter().rev()) // Backward
             }
         } else {
             Box::new(fg.variables.iter())
@@ -189,13 +146,21 @@ pub fn ls_belief_propagation(
             }
         }
 
-        // Factors update can also benefit from ordering if associated with variables, 
-        // but here we iterate simply. In a true tree schedule, we'd update factors connected
-        // to the current wavefront of variables.
+        // Factors update can also benefit from ordering if associated with variables
+        let factor_iterator: Box<dyn Iterator<Item = &Factor>> = if use_factor_priority {
+            if iter % 2 == 0 {
+                Box::new(fg.factors.iter())
+            } else {
+                Box::new(fg.factors.iter().rev())
+            }
+        } else {
+            Box::new(fg.factors.iter())
+        };
+
         // NB passes on incoming messages to factor (except output variable),
         //    weighted by factor marginalized over all other variables,
         //    see eqn. (14.15) of Information, Physics & Computation, Mezard.
-        for factor in &fg.factors {
+        for factor in factor_iterator {
             let fvars = &factor.variables;
             let ftable = &factor.table;
 
@@ -613,7 +578,7 @@ mod tests {
             .map(|i| Variable {
                 id: i,
                 var_type: VariableType::Latent,
-                depth: Some(i),
+                priority: Some(i),
             })
             .collect();
 
@@ -628,6 +593,7 @@ mod tests {
                 variables: vars.clone(),
                 table,
                 factor_type: ftype,
+                priority: None, // Calculated automatically
             });
             factor_to_vars.insert(fid, vars.clone());
             for v in vars {
@@ -657,6 +623,9 @@ mod tests {
             factor_to_vars,
             domain_size: n_states,
         };
+        // We need mutable access to sort
+        let mut fg = fg;
+        fg.sort_by_priority();
 
         // Custom Unnormalized BP for Partition Function Z (Likelihood)
         // Note: This block uses raw probability logic for 'node_belief', 
@@ -781,7 +750,7 @@ mod tests {
         // Run LS BP
         // For a chain, 2 iterations (1 forward, 1 backward pass) should receive info from all nodes
         // But since schedule alternates, we might need enough iterations to cover diameter.
-        // With depth schedule: iter 0 (forward), iter 1 (backward). Should converge in 2 passes.
+        // With order schedule: iter 0 (forward), iter 1 (backward). Should converge in 2 passes.
         let max_iters = 25; 
         let tol = 1e-9;
         let bp_log_marginals = ls_belief_propagation(&fg, max_iters, tol, None, None);
@@ -834,21 +803,21 @@ mod tests {
         let exact_marginals = felsensteins(nleaves, nancestors, ncolor, &emission_factors, &pairwise_table);
 
         // 4. Build Factor Graph
-        // Determine depths for variables
-        let mut depths = vec![0; nnodes];
-        // Leaves are depth 0
+        // Determine priorities for variables
+        let mut priorities = vec![0; nnodes];
+        // Leaves are priority 0
         // Ancestors: p depends on children left/right
         for p in nleaves..nnodes {
             let left = 2 * (p - nleaves);
             let right = 2 * (p - nleaves) + 1;
-            depths[p] = std::cmp::max(depths[left], depths[right]) + 1;
+            priorities[p] = std::cmp::max(priorities[left], priorities[right]) + 1;
         }
 
         let variables: Vec<Variable> = (0..nnodes).map(|id| {
             Variable {
                 id,
                 var_type: VariableType::Latent,
-                depth: Some(depths[id]),
+                priority: Some(priorities[id]),
             }
         }).collect();
 
@@ -863,6 +832,7 @@ mod tests {
                 variables: vars.clone(),
                 table,
                 factor_type: ftype,
+                priority: None, // Calculated automatically
             });
             factor_to_vars.insert(fid, vars.clone());
             for v in vars {
@@ -895,6 +865,7 @@ mod tests {
             factor_to_vars,
             domain_size: ncolor,
         };
+        fg.sort_by_priority();
 
         // 5. Run BP
         // Tree diameter: approx 2 * log2(8) = 6.
@@ -941,7 +912,7 @@ mod tests {
         let variables: Vec<Variable> = (0..n_vars).map(|i| Variable {
             id: i,
             var_type: VariableType::Latent,
-            depth: None, // No depth in loopy graph
+            priority: None, // No priority in loopy graph
         }).collect();
 
         // 2. Define Factors
@@ -956,6 +927,7 @@ mod tests {
                 variables: vars.clone(),
                 table,
                 factor_type: ftype,
+                priority: None,
             });
             factor_to_vars.insert(fid, vars.clone());
             for v in vars {
@@ -991,6 +963,7 @@ mod tests {
             factor_to_vars,
             domain_size,
         };
+        fg.sort_by_priority();
 
         // 3. Brute Force Exact Solution (Log Domain)
         let mut joint_log_prob = vec![0.0; 1 << n_vars];
@@ -1078,7 +1051,7 @@ mod tests {
         let variables: Vec<Variable> = (0..n_vars).map(|i| Variable {
             id: i,
             var_type: VariableType::Latent,
-            depth: None,
+            priority: None,
         }).collect();
 
         let mut factors = Vec::new();
@@ -1099,6 +1072,7 @@ mod tests {
                 variables: vars.clone(),
                 table,
                 factor_type: FactorType::Custom,
+                priority: None,
             });
             factor_to_vars.insert(fid, vars.clone());
             for &v in &vars {
@@ -1153,6 +1127,7 @@ mod tests {
             factor_to_vars,
             domain_size,
         };
+        fg.sort_by_priority();
 
         // 2 iters just to ensure it runs without crashing, as full convergence takes long
         let max_iters = 5; 
