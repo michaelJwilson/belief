@@ -919,7 +919,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mrf_marginals() {
+    fn test_hmrf_marginals() {
         // Simple 3-node loop: 0-1, 1-2, 2-0.
         let n_vars = 3;
         let domain_size = 2;
@@ -1051,5 +1051,104 @@ mod tests {
         // Note: LBP is not exact for loops, but for small random potentials it's usually decent.
         // We assert reasonable closeness.
         // assert!(max_diff < 0.2, "BP deviated too much ({}) from exact on small loop", max_diff);
+    }
+
+    #[test]
+    fn test_hmrf_marginals_large() {
+        // This test stresses memory and runtime. 
+        // 1M variables, domain size 5. Approx 3-4 GB RAM required for message maps.
+        let width = 100;
+        let height = 1000;
+        let n_vars = width * height;
+        let domain_size = 5;
+        
+        let mut rng = rand::rng();
+
+        let variables: Vec<Variable> = (0..n_vars).map(|i| Variable {
+            id: i,
+            var_type: VariableType::Latent,
+            depth: None,
+        }).collect();
+
+        let mut factors = Vec::new();
+        // Reserve capacity to avoid reallocations
+        // 1 unary per node + ~2 pairwise per node
+        let est_factors = n_vars + 2 * n_vars; 
+        let mut var_to_factors: HashMap<usize, Vec<usize>> = HashMap::with_capacity(n_vars);
+        let mut factor_to_vars: HashMap<usize, Vec<usize>> = HashMap::with_capacity(est_factors);
+        
+        // Pre-populate var_to_factors to avoid check overhead
+        for i in 0..n_vars {
+            var_to_factors.insert(i, Vec::with_capacity(5));
+        }
+
+        let mut add_factor_internal = |fid: usize, vars: Vec<usize>, table: Vec<f64>| {
+            factors.push(Factor {
+                id: fid,
+                variables: vars.clone(),
+                table,
+                factor_type: FactorType::Custom,
+            });
+            factor_to_vars.insert(fid, vars.clone());
+            for &v in &vars {
+                if let Some(list) = var_to_factors.get_mut(&v) {
+                    list.push(fid);
+                }
+            }
+        };
+
+        // Reuse tables to save generation time
+        let mut unary_table = vec![0.0; domain_size];
+        for i in 0..domain_size { unary_table[i] = rng.random::<f64>().ln(); }
+        
+        let mut pairwise_table = vec![0.0; domain_size * domain_size];
+        for i in 0..domain_size {
+            for j in 0..domain_size {
+                let p: f64 = if i == j { 0.9 } else { 0.1 / 4.0 };
+                pairwise_table[i*domain_size + j] = p.ln();
+            }
+        }
+
+        let mut fid_counter = 0;
+
+        for r in 0..height {
+            for c in 0..width {
+                let curr = r * width + c;
+                
+                // Unary
+                add_factor_internal(fid_counter, vec![curr], unary_table.clone());
+                fid_counter += 1;
+
+                // Right
+                if c + 1 < width {
+                    let right = r * width + (c + 1);
+                    add_factor_internal(fid_counter, vec![curr, right], pairwise_table.clone());
+                    fid_counter += 1;
+                }
+                
+                // Down
+                if r + 1 < height {
+                    let down = (r + 1) * width + c;
+                    add_factor_internal(fid_counter, vec![curr, down], pairwise_table.clone());
+                    fid_counter += 1;
+                }
+            }
+        }
+
+        let fg = FactorGraph {
+            variables,
+            factors,
+            var_to_factors,
+            factor_to_vars,
+            domain_size,
+        };
+
+        // 2 iters just to ensure it runs without crashing, as full convergence takes long
+        let max_iters = 5; 
+        let tol = 1e-4;
+        
+        let start = std::time::Instant::now();
+        let _marginals = ls_belief_propagation(&fg, max_iters, tol, None, Some(0.0));
+        println!("BP done in {:?}", start.elapsed());
     }
 }
