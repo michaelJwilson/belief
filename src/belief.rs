@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::collections::{HashMap, VecDeque, HashSet};
+use rand::Rng;
 use rand::prelude::*;
 
 use crate::utils::logsumexp;
@@ -285,7 +286,6 @@ impl FactorToVarMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::Rng;
     use rand::seq::SliceRandom;
     use std::collections::HashMap;
 
@@ -353,11 +353,14 @@ mod tests {
         }
     
         // 3. Run BP
+        println!("Running Belief Propagation on Chain (L={})...", chain_len);
         fg.run_belief_propagation(50, 1e-6);
         let bp_marginals_log = fg.calculate_marginals();
         
         // 4. Compare
+        println!("Comparing Marginals (Exact vs BP):");
         assert_eq!(bp_marginals_log.len(), chain_len);
+        
         for t in 0..chain_len {
              // Convert exact components to marginals
              let mut mj = vec![0.0; n_states];
@@ -375,29 +378,245 @@ mod tests {
              let s_bp: f64 = m_bp.iter().sum();
              for v in &mut m_bp { *v /= s_bp; }
 
+             let diffs: Vec<f64> = (0..n_states).map(|i| (mj[i] - m_bp[i]).abs()).collect();
+             println!("t={}: Exact={:?}, BP={:?}, Diff={:?}", t, mj, m_bp, diffs);
+
              for i in 0..n_states {
-                 assert!((mj[i] - m_bp[i]).abs() < 1e-3, "Mismatch t={} state={}", t, i);
+                 assert!(diffs[i] < 1e-3, "Mismatch t={} state={}", t, i);
              }
         }
     }
 
-    /*
     #[test]
     fn test_tree_marginals() {
-        let nleaves = 8;
-        let ncolor = 2;
-        let nnodes = nleaves + nleaves - 1;
-        let mut rng = rand::rng();
-        let mut emission_factors = Vec::new();
-        for _ in 0..nleaves {
-             let mut row: Vec<f64> = (0..ncolor).map(|_| rng.random::<f64>()).collect();
-             let norm: f64 = row.iter().sum();
-             for v in &mut row { *v /= norm; }
-             emission_factors.push(row);
-        }
-        let mut pairwise_table = vec![0.6, 0.4, 0.3, 0.7]; // simplified
+        // Construct a small binary tree:
+        //        0
+        //      /   \
+        //     1     2
+        //    / \   / \
+        //   3   4 5   6
+        
+        let num_vars = 7;
+        let n_states = 2;
+        let edges = vec![
+            (0, 1), (0, 2),
+            (1, 3), (1, 4),
+            (2, 5), (2, 6)
+        ];
 
-        let exact = felsensteins(nleaves, nleaves-1, ncolor, &emission_factors, &pairwise_table);
+        // Deterministic emissions (unary potentials)
+        let mut emissions = Vec::with_capacity(num_vars);
+        for i in 0..num_vars {
+            // Generate deterministic probabilities based on index
+            let p = 0.1 + ((i as f64 * 0.13) % 0.8);
+            emissions.push(vec![p, 1.0 - p]);
+        }
+
+        // Deterministic transitions (pairwise potentials) - simple symmetric for edges
+        let mut pairwise = Vec::with_capacity(edges.len());
+        for i in 0..edges.len() {
+             let p_stay = 0.6 + ((i as f64 * 0.05) % 0.3); // Values between 0.6 and 0.9
+             pairwise.push(vec![p_stay, 1.0 - p_stay, 1.0 - p_stay, p_stay]);
+        }
+
+        // 1. Brute Force Exact Inference
+        // Since N=7, states=2, total configs = 2^7 = 128. Feasible.
+        let mut exact_marginals = vec![vec![0.0; n_states]; num_vars];
+        let mut total_prob = 0.0;
+
+        for config_idx in 0..(1 << num_vars) {
+            let mut config = vec![0; num_vars];
+            for i in 0..num_vars {
+                if (config_idx >> i) & 1 == 1 {
+                    config[i] = 1;
+                }
+            }
+
+            // Calculate joint probability (unnormalized)
+            let mut log_prob = 0.0;
+            
+            // Unary
+            for i in 0..num_vars {
+                log_prob += emissions[i][config[i]].ln();
+            }
+
+            // Pairwise
+            for (edge_idx, &(u, v)) in edges.iter().enumerate() {
+                let table_idx = config[u] * n_states + config[v];
+                log_prob += pairwise[edge_idx][table_idx].ln();
+            }
+
+            let prob = log_prob.exp();
+            total_prob += prob;
+
+            for i in 0..num_vars {
+                exact_marginals[i][config[i]] += prob;
+            }
+        }
+
+        // Normalize exact marginals
+        for i in 0..num_vars {
+            for s in 0..n_states {
+                exact_marginals[i][s] /= total_prob;
+            }
+        }
+
+        // 2. Factor Graph BP
+        let mut fg = FactorGraph::new(num_vars, n_states);
+        
+        // Add Unary Factors
+        for i in 0..num_vars {
+            fg.add_factor(vec![i], emissions[i].iter().map(|p| p.ln()).collect(), FactorType::Emission);
+        }
+
+        // Add Pairwise Factors
+        for (edge_idx, &(u, v)) in edges.iter().enumerate() {
+            fg.add_factor(vec![u, v], pairwise[edge_idx].iter().map(|p| p.ln()).collect(), FactorType::Transition);
+        }
+
+        println!("Running Belief Propagation on Tree (Nodes={})...", num_vars);
+        fg.run_belief_propagation(50, 1e-6);
+        let bp_marginals_log = fg.calculate_marginals();
+
+        // 3. Compare
+        println!("Comparing Marginals (Exact vs BP):");
+        for i in 0..num_vars {
+            let m_log = &bp_marginals_log[i];
+            let max_v = m_log.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+            let mut m_bp: Vec<f64> = m_log.iter().map(|x| (x - max_v).exp()).collect();
+            let s_bp: f64 = m_bp.iter().sum();
+            for v in &mut m_bp { *v /= s_bp; }
+
+            let diffs: Vec<f64> = (0..n_states).map(|s| (exact_marginals[i][s] - m_bp[s]).abs()).collect();
+            println!("Node {}: Exact={:?}, BP={:?}, Diff={:?}", i, exact_marginals[i], m_bp, diffs);
+
+            for s in 0..n_states {
+                assert!(diffs[s] < 1e-4, "Mismatch node={} state={}", i, s);
+            }
+        }
     }
-    */
+
+    #[test]
+    fn test_hmrf_marginals() {
+        // Construct a small 3x3 Grid (Loopy Graph)
+        // 0 -- 1 -- 2
+        // |    |    |
+        // 3 -- 4 -- 5
+        // |    |    |
+        // 6 -- 7 -- 8
+        
+        let width = 3;
+        let height = 3;
+        let num_vars = width * height;
+        let n_states = 2; // Binary grid
+
+        let mut edges = Vec::new();
+        // Horizontal edges
+        for r in 0..height {
+            for c in 0..width - 1 {
+                let u = r * width + c;
+                let v = r * width + c + 1;
+                edges.push((u, v));
+            }
+        }
+        // Vertical edges
+        for r in 0..height - 1 {
+            for c in 0..width {
+                let u = r * width + c;
+                let v = (r + 1) * width + c;
+                edges.push((u, v));
+            }
+        }
+
+        // Deterministic emissions (Unary)
+        let mut emissions = Vec::with_capacity(num_vars);
+        for i in 0..num_vars {
+            let p = 0.6 + ((i as f64 * 0.1) % 0.3); // Biased towards state 0
+            emissions.push(vec![p, 1.0 - p]);
+        }
+
+        // Deterministic pairwise potentials (Potts/Ising model-like)
+        // Strong coupling to make loops relevant
+        let coupling_prob: f64 = 0.8; 
+        let pairwise_table = vec![coupling_prob, 1.0 - coupling_prob, 1.0 - coupling_prob, coupling_prob];
+
+        // 1. Brute Force Exact Inference
+        // 2^9 = 512 total configurations. Slightly larger but instant.
+        let mut exact_marginals = vec![vec![0.0; n_states]; num_vars];
+        let mut total_prob = 0.0;
+
+        for config_idx in 0..(1 << num_vars) {
+            let mut config = vec![0; num_vars];
+            for i in 0..num_vars {
+                if (config_idx >> i) & 1 == 1 {
+                    config[i] = 1;
+                }
+            }
+
+            let mut log_prob = 0.0;
+            // Unary
+            for i in 0..num_vars {
+                log_prob += emissions[i][config[i]].ln();
+            }
+            // Pairwise
+            for &(u, v) in &edges {
+                let table_idx = config[u] * n_states + config[v];
+                log_prob += pairwise_table[table_idx].ln();
+            }
+
+            let prob = log_prob.exp();
+            total_prob += prob;
+
+            for i in 0..num_vars {
+                exact_marginals[i][config[i]] += prob;
+            }
+        }
+        
+        // Normalize
+        for i in 0..num_vars {
+            for s in 0..n_states {
+                exact_marginals[i][s] /= total_prob;
+            }
+        }
+
+        // 2. Build Factor Graph / Run Loopy BP
+        let mut fg = FactorGraph::new(num_vars, n_states);
+        
+        for i in 0..num_vars {
+            fg.add_factor(vec![i], emissions[i].iter().map(|p| p.ln()).collect(), FactorType::Emission);
+        }
+
+        let pw_log: Vec<f64> = pairwise_table.iter().map(|p| p.ln()).collect();
+        for &(u, v) in &edges {
+            fg.add_factor(vec![u, v], pw_log.clone(), FactorType::Transition);
+        }
+
+        println!("Running Loopy Belief Propagation on 3x3 Grid...");
+        // Loopy BP is approximate and iterative.
+        fg.run_belief_propagation(100, 1e-5);
+        let bp_marginals_log = fg.calculate_marginals();
+
+        // 3. Compare (Expect deviations due to loops, but should be correlated)
+        println!("Comparing Marginals (Exact vs Loopy BP):");
+        let mut max_diff = 0.0;
+        
+        for i in 0..num_vars {
+            let m_log = &bp_marginals_log[i];
+            let max_v = m_log.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+            let mut m_bp: Vec<f64> = m_log.iter().map(|x| (x - max_v).exp()).collect();
+            let s_bp: f64 = m_bp.iter().sum();
+            for v in &mut m_bp { *v /= s_bp; }
+
+            let diffs: Vec<f64> = (0..n_states).map(|s| (exact_marginals[i][s] - m_bp[s]).abs()).collect();
+            println!("Node {}: Exact={:?}, BP={:?}, Diff={:?}", i, exact_marginals[i], m_bp, diffs);
+            
+            for s in 0..n_states {
+                if diffs[s] > max_diff { max_diff = diffs[s]; }
+            }
+        }
+
+        println!("Max discrepancy in marginals: {}", max_diff);
+        // Loopy BP is generally good but not exact. Assert reasonable closeness.
+        assert!(max_diff < 0.05, "Loopy BP diverged significantly from exact marginals");
+    }
 }
