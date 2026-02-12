@@ -1,5 +1,5 @@
 // use algos::dijkstra::{dijkstra, get_adjacencies_fixture_large};
-use log::{info, warn};
+use log::info;
 // use pprof;
 // use std::fs::File;
 

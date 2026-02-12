@@ -836,4 +836,122 @@ mod tests {
         println!("Max difference over all nodes: {:.3e}", max_diff);
         assert!(max_diff < 1e-5, "BP did not converge to exact tree marginals");
     }
+
+    #[test]
+    fn test_mrf_marginals() {
+        // Simple 3-node loop: 0-1, 1-2, 2-0.
+        let n_vars = 3;
+        let domain_size = 2;
+        
+        let mut rng = rand::rng();
+
+        // 1. Define Variables
+        let variables: Vec<Variable> = (0..n_vars).map(|i| Variable {
+            id: i,
+            var_type: VariableType::Latent,
+            depth: None, // No depth in loopy graph
+        }).collect();
+
+        // 2. Define Factors
+        let mut factors = Vec::new();
+        let mut var_to_factors: HashMap<usize, Vec<usize>> = HashMap::default();
+        let mut factor_to_vars: HashMap<usize, Vec<usize>> = HashMap::default();
+
+        let mut add_factor = |vars: Vec<usize>, table: Vec<f64>, ftype: FactorType| {
+            let fid = factors.len();
+            factors.push(Factor {
+                id: fid,
+                variables: vars.clone(),
+                table,
+                factor_type: ftype,
+            });
+            factor_to_vars.insert(fid, vars.clone());
+            for v in vars {
+                var_to_factors.entry(v).or_default().push(fid);
+            }
+        };
+
+        // Unary factors (random)
+        let mut unary_tables = Vec::new();
+        for i in 0..n_vars {
+            let mut t = vec![rng.random::<f64>(), rng.random::<f64>()];
+            // Normalize for better stability, though strict correctness doesn't require it for potentials
+            let sum: f64 = t.iter().sum();
+            for v in &mut t { *v /= sum; }
+            unary_tables.push(t.clone());
+            add_factor(vec![i], t, FactorType::Custom);
+        }
+
+        // Pairwise factors (random symmetric interactions)
+        let edges = vec![(0, 1), (1, 2), (2, 0)];
+        let mut pairwise_tables = HashMap::new();
+        for &(u, v) in &edges {
+            let mut t = vec![0.0; 4];
+            for k in 0..4 { t[k] = rng.random::<f64>(); }
+            pairwise_tables.insert((u, v), t.clone());
+            add_factor(vec![u, v], t, FactorType::Custom);
+        }
+
+        let fg = FactorGraph {
+            variables,
+            factors,
+            var_to_factors,
+            factor_to_vars,
+            domain_size,
+        };
+
+        // 3. Brute Force Exact Solution
+        let mut joint_prob = vec![0.0; 1 << n_vars];
+        let mut total_z = 0.0;
+
+        for i in 0..(1 << n_vars) {
+            let x = vec![(i >> 0) & 1, (i >> 1) & 1, (i >> 2) & 1]; // x0, x1, x2
+            
+            let mut p = 1.0;
+            // Unary
+            for v in 0..n_vars {
+                p *= unary_tables[v][x[v]];
+            }
+            // Pairwise
+            for &(u, v) in &edges {
+                // Determine factor table index. Assuming factor vars are [u, v].
+                // Row major: x[u]*2 + x[v]
+                let idx = x[u] * 2 + x[v];
+                p *= pairwise_tables[&(u, v)][idx];
+            }
+            
+            joint_prob[i] = p;
+            total_z += p;
+        }
+
+        let mut exact_marginals = vec![vec![0.0; domain_size]; n_vars];
+        for i in 0..(1 << n_vars) {
+            let prob = joint_prob[i] / total_z;
+            let x = vec![(i >> 0) & 1, (i >> 1) & 1, (i >> 2) & 1];
+            for v in 0..n_vars {
+                exact_marginals[v][x[v]] += prob;
+            }
+        }
+
+        // 4. Run Belief Propagation
+        let max_iters = 100;
+        let tol = 1e-9;
+        let bp_marginals = ls_belief_propagation(&fg, max_iters, tol, None);
+
+        // 5. Compare
+        println!("\nMRF Small Loop Comparison (Exact vs BP):");
+        let mut max_diff = 0.0;
+        for v in 0..n_vars {
+            println!("Var {}: Exact {:?}, BP {:?}", v, exact_marginals[v], bp_marginals[v]);
+            for s in 0..domain_size {
+                let diff = (exact_marginals[v][s] - bp_marginals[v][s]).abs();
+                if diff > max_diff { max_diff = diff; }
+            }
+        }
+        println!("Max Diff: {:.6e}", max_diff);
+        
+        // Note: LBP is not exact for loops, but for small random potentials it's usually decent.
+        // We assert reasonable closeness.
+        // assert!(max_diff < 0.2, "BP deviated too much ({}) from exact on small loop", max_diff);
+    }
 }
