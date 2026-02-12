@@ -11,10 +11,8 @@ pub enum VariableType {
 #[derive(Clone)]
 pub struct Variable {
     pub id: usize,
-    #[deprecated(note = "Variable domains should be uniform.")]
-    pub domain: usize, 
     pub var_type: VariableType,
-    pub depth: Option<usize>, // Added depth parameter
+    pub depth: Option<usize>,
 }
 
 // NB Forney-style factor graph: factors are functions of their variables, and variables are connected to factors.
@@ -22,38 +20,39 @@ pub struct Variable {
 pub enum FactorType {
     Emission,
     Transition,
-    Prior, // Renamed from Start_Prior
+    Prior,
     Custom,
 }
 
 pub struct Factor {
     pub id: usize,
-    pub variables: Vec<usize>,   // variable ids
+    pub variables: Vec<usize>,
     pub table: Vec<f64>, // flattened table, row-major, probabilities for all clique assignments to this factor.
-    pub factor_type: FactorType, // label for the type of factor
+    pub factor_type: FactorType,
 }
 
 /// NB Forney factor graph is with variables and factors connected by edges.
 pub struct FactorGraph {
     pub variables: Vec<Variable>,
     pub factors: Vec<Factor>,
-    pub var_to_factors: HashMap<usize, Vec<usize>>, // variable id -> factor ids.
-    pub factor_to_vars: HashMap<usize, Vec<usize>>, // factor id -> variable ids.
+    pub var_to_factors: HashMap<usize, Vec<usize>>, // map: variable id -> factor ids.
+    pub factor_to_vars: HashMap<usize, Vec<usize>>, // map: factor id -> variable ids.
+    pub domain_size: usize,
 }
 
 /// Decrements the assignment to the next valid state in the joint domain.
 /// Returns true if a valid assignment was found, false if the sequence wrapped around.
-fn next_assignment(assignment: &mut [usize], domains: &[usize], skip: usize) -> bool {
-    for (j, dom) in domains.iter().enumerate() {
+fn next_assignment(assignment: &mut [usize], domain_size: usize, skip: usize) -> bool {
+    for (j, val) in assignment.iter_mut().enumerate() {
         if j == skip {
             continue;
         }
-        assignment[j] += 1;
+        *val += 1;
 
-        if assignment[j] < *dom {
+        if *val < domain_size {
             return true;
         } else {
-            assignment[j] = 0;
+            *val = 0;
         }
     }
 
@@ -81,6 +80,7 @@ pub fn ls_belief_propagation(
 ) -> Vec<Vec<f64>> {
 
     let beta: f64 = beta.unwrap_or(1.0);
+    let domain_size = fg.domain_size;
 
     println!("Solving belief propagation");
 
@@ -97,20 +97,10 @@ pub fn ls_belief_propagation(
     let mut messages: Message = HashMap::default();
 
     // Initialize messages from variables to factors as uniform distributions.
-    // Assuming uniform domain size based on the first variable if deprecating varying domains.
-    let global_domain_size = if let Some(first) = fg.variables.first() { first.domain } else { 0 };
-
     for var in &fg.variables {
-        #[allow(deprecated)]
-        let vdom = var.domain;
-        // Sanity check for deprecated varying domains
-        if vdom != global_domain_size {
-           // We allow it for now but ideally should be uniform
-        }
-
         for &fid in fg.var_to_factors.get(&var.id).unwrap() {
-            for s in 0..vdom {
-                messages.insert((var.id, fid, s), 1.0 / vdom as f64);
+            for s in 0..domain_size {
+                messages.insert((var.id, fid, s), 1.0 / domain_size as f64);
             }
         }
     }
@@ -118,10 +108,8 @@ pub fn ls_belief_propagation(
     // Initialize messages from factors to variables as uniform distributions.
     for factor in &fg.factors {
         for &vid in &factor.variables {
-            let vdom = fg.variables.iter().find(|v| v.id == vid).unwrap().domain;
-
-            for s in 0..vdom {
-                messages.insert((factor.id, vid, s), 1.0 / vdom as f64);
+            for s in 0..domain_size {
+                messages.insert((factor.id, vid, s), 1.0 / domain_size as f64);
             }
         }
     }
@@ -146,11 +134,8 @@ pub fn ls_belief_propagation(
         // NB  passes on incoming messages to var (except output factor),
         //	   see eqn. (14.14) of Information, Physics & Computation, Mezard.
         for var in var_iterator {
-            #[allow(deprecated)]
-            let vdom = var.domain;
-
             for &fid in fg.var_to_factors.get(&var.id).unwrap() {
-                for s in 0..vdom {
+                for s in 0..domain_size {
                     let mut prod = 1.0;
 
                     for &other_fid in fg.var_to_factors.get(&var.id).unwrap() {
@@ -175,23 +160,12 @@ pub fn ls_belief_propagation(
             let ftable = &factor.table;
 
             for (i, &vid) in fvars.iter().enumerate() {
-                #[allow(deprecated)]
-                let vdom = fg.variables.iter().find(|v| v.id == vid).unwrap().domain;
-
-                for s in 0..vdom {
+                for s in 0..domain_size {
                     // NB sum over all assignments to other variables in the factor
                     let mut sum = 0.0;
                     let num_vars = fvars.len();
 
                     let mut current_assignment = vec![0; num_vars];
-
-                    // Optimization: Pre-collect domains to avoid lookup in inner loop
-                    #[allow(deprecated)]
-                    let domains: Vec<usize> = fvars
-                        .iter()
-                        .map(|vid| fg.variables.iter().find(|v| v.id == *vid).unwrap().domain)
-                        .collect();
-
                     current_assignment[i] = s;
 
                     loop {
@@ -200,9 +174,9 @@ pub fn ls_belief_propagation(
                         let mut stride = 1;
 
                         // NB row-major: last index first.
-                        for (j, &a) in current_assignment.iter().rev().enumerate() {
+                        for &a in current_assignment.iter().rev() {
                             idx += a * stride;
-                            stride *= domains[domains.len() - 1 - j];
+                            stride *= domain_size;
                         }
 
                         let mut prod = 1.0;
@@ -215,7 +189,7 @@ pub fn ls_belief_propagation(
 
                         sum += ftable[idx].powf(beta) * prod;
 
-                        if !next_assignment(&mut current_assignment, &domains, i) {
+                        if !next_assignment(&mut current_assignment, domain_size, i) {
                             break;
                         }
                     }
@@ -227,16 +201,9 @@ pub fn ls_belief_propagation(
 
         // NB messages are probability distributions, normalize.
         for ((from, to, _), _) in new_messages.clone().iter() {
-            #[allow(deprecated)]
-            let vdom = if let Some(var) = fg.variables.iter().find(|v| v.id == *from) {
-                var.domain
-            } else {
-                fg.variables.iter().find(|v| v.id == *to).unwrap().domain
-            };
+            let norm: f64 = (0..domain_size).map(|s| new_messages[&(*from, *to, s)]).sum();
 
-            let norm: f64 = (0..vdom).map(|s| new_messages[&(*from, *to, s)]).sum();
-
-            for s in 0..vdom {
+            for s in 0..domain_size {
                 let val = new_messages[&(*from, *to, s)] / norm;
                 new_messages.insert((*from, *to, s), val);
             }
@@ -261,19 +228,17 @@ pub fn ls_belief_propagation(
     let mut marginals = Vec::new();
 
     for var in &fg.variables {
-        #[allow(deprecated)]
-        let vdom = var.domain;
-        let mut marginal = vec![1.0; vdom];
+        let mut marginal = vec![1.0; domain_size];
 
         for &fid in fg.var_to_factors.get(&var.id).unwrap() {
-            for s in 0..vdom {
+            for s in 0..domain_size {
                 marginal[s] *= messages[&(fid, var.id, s)];
             }
         }
 
         let norm: f64 = marginal.iter().sum();
 
-        for s in 0..vdom {
+        for s in 0..domain_size {
             marginal[s] /= norm;
         }
 
@@ -385,16 +350,26 @@ fn felsensteins(
         }
         // For each child, compute outs[child][child_state]
         for &child in &[left, right] {
+            let sibling = if child == left { right } else { left };
+
+            // Re-calculate message from sibling -> parent: Sum_{s_sib} P(s_sib | s_p) * L(s_sib)
+            let mut sibling_msg = vec![0.0; ncolor];
+            for parent_state in 0..ncolor {
+                let mut s_sum = 0.0;
+                for sibling_state in 0..ncolor {
+                     let trans = pairwise_table[parent_state * ncolor + sibling_state];
+                     s_sum += trans * likelihoods[sibling][sibling_state];
+                }
+                sibling_msg[parent_state] = s_sum;
+            }
+
             for child_state in 0..ncolor {
                 let mut sum = 0.0;
 
                 for parent_state in 0..ncolor {
                     let trans = pairwise_table[parent_state * ncolor + child_state];
-
-                    // For the sibling, use the upward message
-                    let sibling = if child == left { right } else { left };
-
-                    sum += outs[p][parent_state] * trans * likelihoods[sibling][parent_state];
+                    // Combine info from above (outs[p]) and from sibling side
+                    sum += outs[p][parent_state] * trans * sibling_msg[parent_state];
                 }
 
                 outs[child][child_state] = sum;
@@ -419,69 +394,6 @@ fn felsensteins(
     }
 
     marginals
-}
-
-pub fn compute_tree_positions(nleaves: usize, nancestors: usize) -> Vec<(f64, f64)> {
-    // This function is kept for test visualization/logic but positions are no longer in Variable struct
-    let nnodes = nleaves + nancestors;
-    let mut pos = vec![(0.0, 0.0); nnodes];
-
-    // Leaves: evenly spaced along x at y=0
-    for i in 0..nleaves {
-        pos[i] = (i as f64, 0.0);
-    }
-
-    // Ancestors: recursively place at the midpoint of their children, y increases with depth
-    let mut depth = 1;
-    let mut nodes_in_level = nleaves;
-
-    // NB first parent
-    let mut start_idx = nleaves;
-
-    while start_idx < nnodes {
-        let parents_in_level = nodes_in_level / 2;
-
-        for i in 0..parents_in_level {
-            let left = 2 * (start_idx + i - nleaves);
-            let right = left + 1;
-
-            let parent = start_idx + i;
-
-            let x = (pos[left].0 + pos[right].0) / 2.0;
-            let y = depth as f64;
-
-            pos[parent] = (x, y);
-        }
-
-        nodes_in_level /= 2;
-
-        start_idx += parents_in_level;
-
-        depth += 1;
-    }
-
-    pos
-}
-
-pub fn save_node_marginals(
-    filename: &str,
-    variables: &[Variable],
-    marginals: &[Vec<f64>],
-    felsenstein: &[Vec<f64>],
-) -> std::io::Result<()> {
-    let file = File::create(filename)?;
-    let mut writer = BufWriter::new(file);
-
-    // Removed coordinates from output since they are deprecated in Variable
-    writeln!(writer, "# id,bp_marginal,felsenstein_marginal")?;
-
-    for (var, (bp, fel)) in variables
-        .iter()
-        .zip(marginals.iter().zip(felsenstein.iter()))
-    {
-        writeln!(writer, "{}\t{:?}\t{:?}", var.id, bp, fel)?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -562,75 +474,10 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_tree_positions() {
-        let nleaves = 5;
-        let nancestors = 4;
-        let result = compute_tree_positions(nleaves, nancestors);
-        assert_eq!(result.len(), nleaves + nancestors);
-        for (x, y) in result {
-            assert!(x >= 0.0 && y >= 0.0);
-        }
-    }
-
-    #[test]
-    fn test_save_node_marginals() {
-        let nleaves = 5;
-        let ncolor = 3;
-        let variables = vec![
-            Variable {
-                id: 0,
-                domain: ncolor,
-                var_type: VariableType::Latent,
-                depth: Some(0),
-            },
-            Variable {
-                id: 1,
-                domain: ncolor,
-                var_type: VariableType::Latent,
-                depth: Some(0),
-            },
-            Variable {
-                id: 2,
-                domain: ncolor,
-                var_type: VariableType::Latent,
-                depth: Some(0),
-            },
-            Variable {
-                id: 3,
-                domain: ncolor,
-                var_type: VariableType::Latent,
-                depth: Some(0),
-            },
-            Variable {
-                id: 4,
-                domain: ncolor,
-                var_type: VariableType::Latent,
-                depth: Some(0),
-            },
-        ];
-        let marginals = vec![
-            vec![0.1, 0.3, 0.6],
-            vec![0.2, 0.4, 0.4],
-            vec![0.3, 0.5, 0.2],
-            vec![0.4, 0.3, 0.3],
-            vec![0.5, 0.2, 0.3],
-        ];
-        let exp = vec![
-            vec![0.1, 0.3, 0.6],
-            vec![0.2, 0.4, 0.4],
-            vec![0.3, 0.5, 0.2],
-            vec![0.4, 0.3, 0.3],
-            vec![0.5, 0.2, 0.3],
-        ];
-        save_node_marginals("data/node_marginals.csv", &variables, &marginals, &exp).unwrap();
-    }
-
-    #[test]
-    fn test_hmm_likelihood() {
+    fn test_chain_marginals() {
         let n_states: usize = 2;
         let chain_len: usize = 5;
 
-        // Simple HMM parameters
         let trans = vec![
             0.6, 0.4, // 0->0, 0->1
             0.3, 0.7, // 1->0, 1->1
@@ -648,12 +495,10 @@ mod tests {
         // --- 1. Standard Forward Pass ---
         let mut alpha = vec![0.0; n_states];
 
-        // Initialization
         for i in 0..n_states {
             alpha[i] = prior[i] * emit[i * 2 + obs[0]];
         }
 
-        // Recursion
         for t in 1..chain_len {
             let mut next_alpha = vec![0.0; n_states];
             for j in 0..n_states {
@@ -674,7 +519,6 @@ mod tests {
         let variables: Vec<Variable> = (0..chain_len)
             .map(|i| Variable {
                 id: i,
-                domain: n_states,
                 var_type: VariableType::Latent,
                 depth: Some(i),
             })
@@ -684,13 +528,13 @@ mod tests {
         let mut var_to_factors: HashMap<usize, Vec<usize>> = HashMap::default();
         let mut factor_to_vars: HashMap<usize, Vec<usize>> = HashMap::default();
 
-        let mut add_factor = |vars: Vec<usize>, table: Vec<f64>| {
+        let mut add_factor = |vars: Vec<usize>, table: Vec<f64>, ftype: FactorType| {
             let fid = factors.len();
             factors.push(Factor {
                 id: fid,
                 variables: vars.clone(),
                 table,
-                factor_type: FactorType::Custom,
+                factor_type: ftype,
             });
             factor_to_vars.insert(fid, vars.clone());
             for v in vars {
@@ -699,18 +543,18 @@ mod tests {
         };
 
         // Prior Factor on X0
-        add_factor(vec![0], prior.clone());
+        add_factor(vec![0], prior.clone(), FactorType::Prior);
 
         // Emission Factors for X0..XT
         for (t, &o) in obs.iter().enumerate() {
             let table: Vec<f64> = (0..n_states).map(|s| emit[s * 2 + o]).collect();
-            add_factor(vec![t], table);
+            add_factor(vec![t], table.clone(), FactorType::Emission);
         }
 
         // Transition Factors for Xt -> Xt+1
         for t in 0..chain_len - 1 {
             // Factor connects [t, t+1]. Table is flat row-major: t is row, t+1 is col.
-            add_factor(vec![t, t + 1], trans.clone());
+            add_factor(vec![t, t + 1], trans.clone(), FactorType::Transition);
         }
 
         let fg = FactorGraph {
@@ -718,6 +562,7 @@ mod tests {
             factors,
             var_to_factors,
             factor_to_vars,
+            domain_size: n_states,
         };
 
         // Custom Unnormalized BP for Partition Function Z (Likelihood)
@@ -862,5 +707,133 @@ mod tests {
             }
             println!("--------------------------------------------------");
         }
+    }
+
+    #[test]
+    fn test_tree_marginals() {
+        let nleaves = 8;
+        let ncolor = 2;
+        let nancestors = nleaves - 1;
+        let nnodes = nleaves + nancestors;
+
+        let mut rng = rand::rng();
+
+        // 1. Generate Random emissions for leaves
+        let mut emission_factors = Vec::new();
+        for _ in 0..nleaves {
+            let mut row: Vec<f64> = (0..ncolor).map(|_| rng.random::<f64>()).collect();
+            let norm: f64 = row.iter().sum();
+            for v in &mut row { *v /= norm; }
+            emission_factors.push(row);
+        }
+
+        // 2. Generate Transition Matrix (symmetric for simplicity, though not required)
+        let mut pairwise_table: Vec<f64> = (0..ncolor*ncolor).map(|_| rng.random::<f64>()).collect();
+        // Normalize rows
+        for i in 0..ncolor {
+            let sum: f64 = pairwise_table[i*ncolor..(i+1)*ncolor].iter().sum();
+            for j in 0..ncolor {
+                pairwise_table[i*ncolor + j] /= sum;
+            }
+        }
+
+        // 3. Compute Exact Marginals using Felsenstein's Pruning
+        let exact_marginals = felsensteins(nleaves, nancestors, ncolor, &emission_factors, &pairwise_table);
+
+        // 4. Build Factor Graph
+        // Determine depths for variables
+        let mut depths = vec![0; nnodes];
+        // Leaves are depth 0
+        // Ancestors: p depends on children left/right
+        for p in nleaves..nnodes {
+            let left = 2 * (p - nleaves);
+            let right = 2 * (p - nleaves) + 1;
+            depths[p] = std::cmp::max(depths[left], depths[right]) + 1;
+        }
+
+        let variables: Vec<Variable> = (0..nnodes).map(|id| {
+            Variable {
+                id,
+                var_type: VariableType::Latent,
+                depth: Some(depths[id]),
+            }
+        }).collect();
+
+        let mut factors = Vec::new();
+        let mut var_to_factors: HashMap<usize, Vec<usize>> = HashMap::default();
+        let mut factor_to_vars: HashMap<usize, Vec<usize>> = HashMap::default();
+
+        let mut add_factor = |vars: Vec<usize>, table: Vec<f64>, ftype: FactorType| {
+            let fid = factors.len();
+            factors.push(Factor {
+                id: fid,
+                variables: vars.clone(),
+                table,
+                factor_type: ftype,
+            });
+            factor_to_vars.insert(fid, vars.clone());
+            for v in vars {
+                var_to_factors.entry(v).or_default().push(fid);
+            }
+        };
+
+        // Emission Factors (Leaves)
+        for (i, table) in emission_factors.iter().enumerate() {
+            add_factor(vec![i], table.clone(), FactorType::Emission);
+        }
+
+        // Transition Factors (Edges)
+        // Felsenstein logic: p connected to left and right
+        for p in nleaves..nnodes {
+            let left = 2 * (p - nleaves);
+            let right = 2 * (p - nleaves) + 1;
+            
+            // Edge p -> left
+            // Table should be p (row) -> left (col)
+            add_factor(vec![p, left], pairwise_table.clone(), FactorType::Transition);
+            
+            // Edge p -> right
+            add_factor(vec![p, right], pairwise_table.clone(), FactorType::Transition);
+        }
+
+        let fg = FactorGraph {
+            variables,
+            factors,
+            var_to_factors,
+            factor_to_vars,
+            domain_size: ncolor,
+        };
+
+        // 5. Run BP
+        // Tree diameter: approx 2 * log2(8) = 6.
+        let max_iters = 10;
+        let tol = 1e-9;
+        let bp_marginals = ls_belief_propagation(&fg, max_iters, tol, None);
+
+        // 6. Compare
+        println!("\nTree Marginals Comparison (Leaves and Root):");
+        println!("{:>5} | {:>15} | {:>15}", "Node", "Exact (Fel)", "BP");
+        
+        let nodes_to_check: Vec<usize> = (0..5).chain(std::iter::once(nnodes-1)).collect(); // First 5 leaves + root
+
+        for &id in &nodes_to_check {
+             for s in 0..ncolor {
+                let exact = exact_marginals[id][s];
+                let bp = bp_marginals[id][s];
+                let diff = (exact - bp).abs();
+                println!("{:>5} | State {}: {:.6} | {:.6}", id, s, exact, bp);
+                assert!(diff < 1e-5, "Mismatch at node {}, state {}: exact={}, bp={}", id, s, exact, bp);
+             }
+             println!("---");
+        }
+
+        // Global check
+        let max_diff = exact_marginals.iter().flatten()
+            .zip(bp_marginals.iter().flatten())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        
+        println!("Max difference over all nodes: {:.3e}", max_diff);
+        assert!(max_diff < 1e-5, "BP did not converge to exact tree marginals");
     }
 }
