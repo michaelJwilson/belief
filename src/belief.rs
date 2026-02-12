@@ -3,8 +3,8 @@ use std::io::{BufWriter, Write};
 use std::collections::HashMap;
 use rand::prelude::*;
 
-use utils::logsumexp;
-use factor_graph::{Variable, VariableType, Factor, FactorType, FactorGraph};
+use crate::utils::logsumexp;
+use crate::factor_graph::{Variable, VariableType, Factor, FactorType, FactorGraph};
 
 /// Decrements the assignment to the next valid state in the joint domain.
 /// Returns true if a valid assignment was found, false if the sequence wrapped around.
@@ -25,64 +25,96 @@ fn next_assignment(assignment: &mut [usize], domain_size: usize, skip: usize) ->
     false
 }
 
-// Message from variable to factor or vice versa. Indexed by (from, to, assignment).
-// Message flows along edges: (from_id, to_id, state_index) -> value
-type Message = HashMap<(usize, usize, usize), f64>;
+// NB message from variable to factor or vice versa. Indexed by (from, to, assignment).
+pub type MessageMap = HashMap<(usize, usize, usize), f64>;
 
-/// Returns a vector of log-marginal distributions for each variable in the factor graph.
-/// Each entry is a vector of log-probabilities (length = variable domain size) representing
-/// the estimated marginal log-probability of each assignment for that variable after belief propagation.
-/// 
-/// # Arguments
-/// * `fg` - The factor graph definition.
-/// * `max_iters` - Maximum number of iterations for loopy belief propagation.
-/// * `tol` - Convergence tolerance for message updates.
-/// * `beta` - Inverse temperature (1.0 for standard BP, Infinity for Max-Product).
-/// * `damping` - Inertia for message updates (0.0 = no damping, 1.0 = no updates).
-pub fn ls_belief_propagation(
-    fg: &FactorGraph,
-    max_iters: usize,
-    tol: f64,
-    beta: Option<f64>,
-    damping: Option<f64>,
-) -> Vec<Vec<f64>> {
-    // NB message sharpening - raising factor potentials to power beta (inverse temperature) before normalization.
+pub struct VarToFactorMessage;
+
+impl VarToFactorMessage {
+    // NB simple ln. sum of incoming messages from factors to this variable;
+    //    see eqn. (14.14) of Information, Physics & Computation, Mezard.
+    pub fn update(
+        var_id: usize, 
+        target_factor_id: usize, 
+        state: usize, 
+        incoming_messages: &[f64]
+    ) -> f64 {
+        incoming_messages.iter().sum()
+    }
+}
+
+pub struct FactorToVarMessage;
+
+impl FactorToVarMessage {
+    pub fn update(
+        factor: &Factor,
+        target_var_idx: usize,
+        target_state: usize,
+        domain_size: usize,
+        incoming_messages: &[Vec<f64>] // Vector of messages from each variable in factor.variables
+    ) -> f64 {
+        // Validation: incoming_messages should correspond to Factor.variables (Var -> Factor messages)
+        // assert_eq!(incoming_messages.len(), factor.variables.len());
+
+        // NB we will sum over factor assignments bar the target variable,
+        //    weighted by corresponding input variable messages.
+        //    see eqn. (14.15) of Information, Physics & Computation, Mezard.
+        let mut current_assignment = vec![0; factor.variables.len()];
+        current_assignment[target_var_idx] = target_state;
+
+        // NB 
+        let mut log_terms = Vec::with_capacity(domain_size.pow((factor.variables.len() - 1) as u32));
+
+        loop {
+            // NB compute index into factor table
+            let mut idx = 0;
+            let mut stride = 1;
+
+            // NB row-major: last index first.
+            for &a in current_assignment.iter().rev() {
+                idx += a * stride;
+                stride *= domain_size;
+            }
+
+            let mut term = 0.0;
+            
+            for (j, msg) in incoming_messages.iter().enumerate() {
+                if j != target_var_idx {
+                    // Read message from Var (j) -> Factor
+                    // msg contains the value for the specific assignment of variable j
+                    term += msg[current_assignment[j]]; 
+                }
+            }
+
+            // Factor potential (log) + incoming messages (log)
+            log_terms.push(factor.table[idx] + term);
+
+            if !next_assignment(&mut current_assignment, domain_size, target_var_idx) {
+                break;
+            }
+        }
+
+        logsumexp(&log_terms)
+    }
+}
+
+pub fn initialize_messages(fg: &FactorGraph) -> MessageMap {
     let domain_size = fg.domain_size;
-
-    let target_beta: f64 = beta.unwrap_or(1.0);
-    let mut beta = target_beta;
-    
-    let damping = damping.unwrap_or(0.0);
-
-    let ln_damping = if damping > 0.0 { damping.ln() } else { f64::NEG_INFINITY };
-    let ln_inv_damping = if damping < 1.0 { (1.0 - damping).ln() } else { f64::NEG_INFINITY };
-
-    println!("Solving belief propagation with beta={:.2}, damping={:.2}", target_beta, damping);
+    let mut messages: MessageMap = HashMap::default();
 
     // NB variables & Factors may have overlapping ids; offset to avoid collisions.
     let max_var_id = fg.variables.iter().map(|v| v.id).max().unwrap_or(0);
     let factor_offset = max_var_id + 1;
 
-    // Detect if we should use alternating schedule based on presence of priority
-    let use_var_priority = fg.variables.iter().any(|v| v.priority.is_some());
-    let use_factor_priority = fg.factors.iter().any(|f| f.priority.is_some());
-    
-    if use_var_priority {
-        println!("Using variable priority-based schedule for message passing (assuming FG sorted).");
-    }
-    if use_factor_priority {
-        println!("Using factor priority-based schedule for message passing (assuming FG sorted).");
-    }
-
-    let mut messages: Message = HashMap::default();
-
     // Initialize messages from variables to factors as uniform distributions (log-space).
     let init_val = -(domain_size as f64).ln();
     for var in &fg.variables {
-        for &fid in fg.var_to_factors.get(&var.id).unwrap() {
-            for s in 0..domain_size {
-                // Key: (FromID, ToID, State). Factor IDs are offset.
-                messages.insert((var.id, fid + factor_offset, s), init_val);
+        if let Some(fids) = fg.var_to_factors.get(&var.id) {
+            for &fid in fids {
+                for s in 0..domain_size {
+                    // Key: (FromID, ToID, State). Factor IDs are offset.
+                    messages.insert((var.id, fid + factor_offset, s), init_val);
+                }
             }
         }
     }
@@ -96,25 +128,56 @@ pub fn ls_belief_propagation(
             }
         }
     }
+    messages
+}
 
-    // NB converges in t*, diameter of the tree (max. node to node distance),
-    //    i.e. 2log_2 num. leaves for a fully balanced (ultrametric) binary tree.
+/// Returns a vector of log-marginal distributions for each variable in the factor graph.
+/// Each entry is a vector of log-probabilities (length = variable domain size) representing
+/// the estimated marginal log-probability of each assignment for that variable after belief propagation.
+/// 
+/// # Arguments
+/// * `fg` - The factor graph definition.
+/// * `max_iters` - Maximum number of iterations for loopy belief propagation.
+/// * `tol` - Convergence tolerance for message updates.
+/// * `damping` - Inertia for message updates (0.0 = no damping, 1.0 = no updates).
+pub fn ls_belief_propagation(
+    fg: &FactorGraph,
+    max_iters: usize,
+    tol: f64,
+    damping: Option<f64>,
+) -> Vec<Vec<f64>> {
+    let domain_size = fg.domain_size;
+    
+    let damping = damping.unwrap_or(0.0);
+
+    let ln_damping = if damping > 0.0 { damping.ln() } else { f64::NEG_INFINITY };
+    let ln_inv_damping = if damping < 1.0 { (1.0 - damping).ln() } else { f64::NEG_INFINITY };
+
+    println!("Solving belief propagation with damping={:.2}", damping);
+
+    // NB variables & Factors may have overlapping ids; offset to avoid collisions.
+    let max_var_id = fg.variables.iter().map(|v| v.id).max().unwrap_or(0);
+    let factor_offset = max_var_id + 1;
+
+    // Detect if we should use alternating schedule based on presence of priority
+    // If variables have priorities, we assume factors are also sorted by priority (derived or explicit).
+    let use_priority = fg.variables.iter().any(|v| v.priority.is_some());
+    
+    if use_priority {
+        println!("Using priority-based schedule for message passing (assuming FG sorted).");
+    }
+
+    let init_val = -(domain_size as f64).ln();
+    let mut messages = initialize_messages(fg);
+
+    // NB converges in max. node to node distance if singly-connected.
     for iter in 0..max_iters {
-        
-        // Beta Annealing: Ramp up beta from small value to target_beta over first 50% of iterations
-        // This helps escape poor local minima / unstable initial conditions in loopy graphs.
-        if iter < max_iters / 2 {
-            let progress = (iter + 1) as f64 / (max_iters as f64 / 2.0);
-            beta = target_beta * progress.max(0.1); 
-        } else {
-            beta = target_beta;
-        }
-
-        let mut new_messages = messages.clone(); // Shallow clone of map structure, new values inserted
+        // NB shallow clone to be updated.
+        let mut new_messages = messages.clone();
 
         // Define the order of variables for updates
         // We use the order in fg.variables, assuming it has been sorted if desired.
-        let var_iterator: Box<dyn Iterator<Item = &Variable>> = if use_var_priority {
+        let var_iterator: Box<dyn Iterator<Item = &Variable>> = if use_priority {
             // Alternating forward/backward passes can speed up convergence in trees/chains
             if iter % 2 == 0 {
                 Box::new(fg.variables.iter()) // Forward
@@ -128,17 +191,24 @@ pub fn ls_belief_propagation(
         // NB  passes on incoming messages to var (except output factor),
         //	   see eqn. (14.14) of Information, Physics & Computation, Mezard.
         for var in var_iterator {
-            for &fid in fg.var_to_factors.get(&var.id).unwrap() {
+            let neighbor_factors = fg.var_to_factors.get(&var.id).unwrap();
+            
+            for &fid in neighbor_factors {
+                // Prepare incoming messages (Factor -> Var)
+                // We need all full distributions for incoming messages or just specific values?
+                // The update rule takes a slice of values.
+                
                 for s in 0..domain_size {
-                    // product in prob domain = sum in log domain
-                    let mut sum_log = 0.0;
-
-                    for &other_fid in fg.var_to_factors.get(&var.id).unwrap() {
+                    let mut incoming_vals = Vec::with_capacity(neighbor_factors.len() - 1);
+                    for &other_fid in neighbor_factors {
                         if other_fid != fid {
-                            // Read message from Factor -> Var
-                            sum_log += messages[&(other_fid + factor_offset, var.id, s)];
+                            // Read message from Factor -> Var (FactorToVarMessage type equivalent)
+                            incoming_vals.push(messages[&(other_fid + factor_offset, var.id, s)]);
                         }
                     }
+
+                    // Compute update using struct
+                    let sum_log = VarToFactorMessage::update(var.id, fid, s, &incoming_vals);
 
                     // Write message from Var -> Factor
                     new_messages.insert((var.id, fid + factor_offset, s), sum_log);
@@ -147,7 +217,7 @@ pub fn ls_belief_propagation(
         }
 
         // Factors update can also benefit from ordering if associated with variables
-        let factor_iterator: Box<dyn Iterator<Item = &Factor>> = if use_factor_priority {
+        let factor_iterator: Box<dyn Iterator<Item = &Factor>> = if use_priority {
             if iter % 2 == 0 {
                 Box::new(fg.factors.iter())
             } else {
@@ -162,50 +232,29 @@ pub fn ls_belief_propagation(
         //    see eqn. (14.15) of Information, Physics & Computation, Mezard.
         for factor in factor_iterator {
             let fvars = &factor.variables;
-            let ftable = &factor.table;
+            
+            // Pre-fetch incoming messages from all variables to this factor for all states
+            // This optimizes the update loop slightly and fits the struct signature
+            let mut incoming_msgs_per_var: Vec<Vec<f64>> = Vec::with_capacity(fvars.len());
+            for &vid in fvars {
+                let mut v_msgs = Vec::with_capacity(domain_size);
+                for s in 0..domain_size {
+                    v_msgs.push(messages[&(vid, factor.id + factor_offset, s)]);
+                }
+                incoming_msgs_per_var.push(v_msgs);
+            }
 
             for (i, &vid) in fvars.iter().enumerate() {
                 for s in 0..domain_size {
-                    // NB sum over all assignments to other variables in the factor
-                    // In log domain: logsumexp over assignments ( term )
+                    // Compute update using struct
+                    let new_val_log = FactorToVarMessage::update(
+                        factor, 
+                        i, 
+                        s, 
+                        domain_size, 
+                        &incoming_msgs_per_var
+                    );
                     
-                    let num_vars = fvars.len();
-                    let mut current_assignment = vec![0; num_vars];
-                    current_assignment[i] = s;
-
-                    // Collect log-terms for logsumexp
-                    // Since specific loop structure, cannot easily pre-allocate but Vec is cheap for small domains
-                    let mut log_terms = Vec::with_capacity(domain_size.pow((num_vars-1) as u32));
-
-                    loop {
-                        // Compute index into factor table
-                        let mut idx = 0;
-                        let mut stride = 1;
-
-                        // NB row-major: last index first.
-                        for &a in current_assignment.iter().rev() {
-                            idx += a * stride;
-                            stride *= domain_size;
-                        }
-
-                        let mut term = 0.0;
-
-                        for (j, &other_vid) in fvars.iter().enumerate() {
-                            if j != i {
-                                // Read message from Var -> Factor
-                                term += messages[&(other_vid, factor.id + factor_offset, current_assignment[j])];
-                            }
-                        }
-
-                        // Factor potential (log) * beta + incoming messages (log)
-                        log_terms.push(ftable[idx] * beta + term);
-
-                        if !next_assignment(&mut current_assignment, domain_size, i) {
-                            break;
-                        }
-                    }
-
-                    let new_val_log = logsumexp(&log_terms);
                     // Write message from Factor -> Var
                     new_messages.insert((factor.id + factor_offset, vid, s), new_val_log);
                 }
@@ -623,9 +672,7 @@ mod tests {
             factor_to_vars,
             domain_size: n_states,
         };
-        // We need mutable access to sort
-        let mut fg = fg;
-        fg.sort_by_priority();
+        // NB delay sorting because manual verification below relies on factor indices matching IDs.
 
         // Custom Unnormalized BP for Partition Function Z (Likelihood)
         // Note: This block uses raw probability logic for 'node_belief', 
@@ -751,9 +798,12 @@ mod tests {
         // For a chain, 2 iterations (1 forward, 1 backward pass) should receive info from all nodes
         // But since schedule alternates, we might need enough iterations to cover diameter.
         // With order schedule: iter 0 (forward), iter 1 (backward). Should converge in 2 passes.
+        let mut fg = fg;
+        fg.sort_by_priority();
+        
         let max_iters = 25; 
         let tol = 1e-9;
-        let bp_log_marginals = ls_belief_propagation(&fg, max_iters, tol, None, None);
+        let bp_log_marginals = ls_belief_propagation(&fg, max_iters, tol, None);
 
         println!("\nMarginals Comparison:");
         println!("{:>5} | {:>15} | {:>15}", "Time", "Exact (F-B)", "BP");
@@ -858,7 +908,7 @@ mod tests {
             add_factor(vec![p, right], pairwise_table.clone(), FactorType::Transition);
         }
 
-        let fg = FactorGraph {
+        let mut fg = FactorGraph {
             variables,
             factors,
             var_to_factors,
@@ -871,7 +921,7 @@ mod tests {
         // Tree diameter: approx 2 * log2(8) = 6.
         let max_iters = 10;
         let tol = 1e-9;
-        let bp_log_marginals = ls_belief_propagation(&fg, max_iters, tol, None, None);
+        let bp_log_marginals = ls_belief_propagation(&fg, max_iters, tol, None);
 
         // 6. Compare
         println!("\nTree Marginals Comparison (Leaves and Root):");
@@ -956,7 +1006,7 @@ mod tests {
             add_factor(vec![u, v], t, FactorType::Custom);
         }
 
-        let fg = FactorGraph {
+        let mut fg = FactorGraph {
             variables,
             factors,
             var_to_factors,
@@ -1009,7 +1059,7 @@ mod tests {
         let max_iters = 100;
         let tol = 1e-9;
         // Use default beta (1.0) and some damping (0.6)
-        let bp_log_marginals = ls_belief_propagation(&fg, max_iters, tol, None, Some(0.6));
+        let bp_log_marginals = ls_belief_propagation(&fg, max_iters, tol, Some(0.6));
 
         // 5. Compare
         println!("\nMRF Small Loop Comparison (Exact vs BP) in Log Domain:");
@@ -1127,14 +1177,40 @@ mod tests {
             factor_to_vars,
             domain_size,
         };
-        fg.sort_by_priority();
+        // fg.sort_by_priority(); // Not needed for random large graph without priorities
 
         // 2 iters just to ensure it runs without crashing, as full convergence takes long
         let max_iters = 5; 
         let tol = 1e-4;
         
         let start = std::time::Instant::now();
-        let _marginals = ls_belief_propagation(&fg, max_iters, tol, None, Some(0.0));
+        let _marginals = ls_belief_propagation(&fg, max_iters, tol, Some(0.0));
         println!("BP done in {:?}", start.elapsed());
+    }
+
+    #[test]
+    fn test_initialize_messages() {
+        let n_vars = 1;
+        let domain_size = 2;
+        let variables = vec![Variable { id: 0, var_type: VariableType::Latent, priority: None }];
+        // Factor 0 connected to Var 0
+        let factors = vec![Factor { id: 0, variables: vec![0], table: vec![0.5, 0.5], factor_type: FactorType::Custom, priority: None }];
+        let mut var_to_factors = HashMap::new();
+        var_to_factors.insert(0, vec![0]);
+        let mut factor_to_vars = HashMap::new();
+        factor_to_vars.insert(0, vec![0]);
+
+        let fg = FactorGraph { variables, factors, var_to_factors, factor_to_vars, domain_size };
+        
+        let msgs = initialize_messages(&fg);
+        
+        // Var 0 (id 0) -> Factor 0 (id 0 + offset 1) : keys (0, 1, s)
+        // Factor 0 (id 0 + offset 1) -> Var 0 (id 0) : keys (1, 0, s)
+        
+        assert_eq!(msgs.len(), 4);
+        let expected_val = -(domain_size as f64).ln();
+        
+        assert!((msgs[&(0, 1, 0)] - expected_val).abs() < 1e-9);
+        assert!((msgs[&(1, 0, 1)] - expected_val).abs() < 1e-9);
     }
 }
