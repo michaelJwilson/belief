@@ -27,7 +27,7 @@ pub enum FactorType {
 pub struct Factor {
     pub id: usize,
     pub variables: Vec<usize>,
-    pub table: Vec<f64>, // flattened table, row-major, probabilities for all clique assignments to this factor.
+    pub table: Vec<f64>, // flattened table, row-major, log-probabilities for all clique assignments.
     pub factor_type: FactorType,
 }
 
@@ -38,6 +38,16 @@ pub struct FactorGraph {
     pub var_to_factors: HashMap<usize, Vec<usize>>, // map: variable id -> factor ids.
     pub factor_to_vars: HashMap<usize, Vec<usize>>, // map: factor id -> variable ids.
     pub domain_size: usize,
+}
+
+/// Computes log(sum(exp(x))) in a numerically stable way.
+fn logsumexp(logs: &[f64]) -> f64 {
+    let max = logs.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+    if max == f64::NEG_INFINITY {
+        return f64::NEG_INFINITY;
+    }
+    let sum = logs.iter().map(|&x| (x - max).exp()).sum::<f64>();
+    max + sum.ln()
 }
 
 /// Decrements the assignment to the next valid state in the joint domain.
@@ -63,9 +73,9 @@ fn next_assignment(assignment: &mut [usize], domain_size: usize, skip: usize) ->
 // Message flows along edges: (from_id, to_id, state_index) -> value
 type Message = HashMap<(usize, usize, usize), f64>;
 
-/// Returns a vector of marginal distributions for each variable in the factor graph.
-/// Each entry is a vector of probabilities (length = variable domain size) representing
-/// the estimated marginal probability of each assignment for that variable after belief propagation.
+/// Returns a vector of log-marginal distributions for each variable in the factor graph.
+/// Each entry is a vector of log-probabilities (length = variable domain size) representing
+/// the estimated marginal log-probability of each assignment for that variable after belief propagation.
 /// 
 /// # Arguments
 /// * `fg` - The factor graph definition.
@@ -88,6 +98,8 @@ pub fn ls_belief_propagation(
     
     let damping = damping.unwrap_or(0.0);
     let domain_size = fg.domain_size;
+    let ln_damping = if damping > 0.0 { damping.ln() } else { f64::NEG_INFINITY };
+    let ln_inv_damping = if damping < 1.0 { (1.0 - damping).ln() } else { f64::NEG_INFINITY };
 
     println!("Solving belief propagation with beta={:.2}, damping={:.2}", target_beta, damping);
 
@@ -103,20 +115,21 @@ pub fn ls_belief_propagation(
 
     let mut messages: Message = HashMap::default();
 
-    // Initialize messages from variables to factors as uniform distributions.
+    // Initialize messages from variables to factors as uniform distributions (log-space).
+    let init_val = -(domain_size as f64).ln();
     for var in &fg.variables {
         for &fid in fg.var_to_factors.get(&var.id).unwrap() {
             for s in 0..domain_size {
-                messages.insert((var.id, fid, s), 1.0 / domain_size as f64);
+                messages.insert((var.id, fid, s), init_val);
             }
         }
     }
 
-    // Initialize messages from factors to variables as uniform distributions.
+    // Initialize messages from factors to variables as uniform distributions (log-space).
     for factor in &fg.factors {
         for &vid in &factor.variables {
             for s in 0..domain_size {
-                messages.insert((factor.id, vid, s), 1.0 / domain_size as f64);
+                messages.insert((factor.id, vid, s), init_val);
             }
         }
     }
@@ -153,15 +166,16 @@ pub fn ls_belief_propagation(
         for var in var_iterator {
             for &fid in fg.var_to_factors.get(&var.id).unwrap() {
                 for s in 0..domain_size {
-                    let mut prod = 1.0;
+                    // product in prob domain = sum in log domain
+                    let mut sum_log = 0.0;
 
                     for &other_fid in fg.var_to_factors.get(&var.id).unwrap() {
                         if other_fid != fid {
-                            prod *= messages[&(other_fid, var.id, s)];
+                            sum_log += messages[&(other_fid, var.id, s)];
                         }
                     }
 
-                    new_messages.insert((var.id, fid, s), prod);
+                    new_messages.insert((var.id, fid, s), sum_log);
                 }
             }
         }
@@ -179,11 +193,15 @@ pub fn ls_belief_propagation(
             for (i, &vid) in fvars.iter().enumerate() {
                 for s in 0..domain_size {
                     // NB sum over all assignments to other variables in the factor
-                    let mut sum = 0.0;
+                    // In log domain: logsumexp over assignments ( term )
+                    
                     let num_vars = fvars.len();
-
                     let mut current_assignment = vec![0; num_vars];
                     current_assignment[i] = s;
+
+                    // Collect log-terms for logsumexp
+                    // Since specific loop structure, cannot easily pre-allocate but Vec is cheap for small domains
+                    let mut log_terms = Vec::with_capacity(domain_size.pow((num_vars-1) as u32));
 
                     loop {
                         // Compute index into factor table
@@ -196,50 +214,83 @@ pub fn ls_belief_propagation(
                             stride *= domain_size;
                         }
 
-                        let mut prod = 1.0;
+                        let mut term = 0.0;
 
                         for (j, &other_vid) in fvars.iter().enumerate() {
                             if j != i {
-                                prod *= messages[&(other_vid, factor.id, current_assignment[j])];
+                                term += messages[&(other_vid, factor.id, current_assignment[j])];
                             }
                         }
 
-                        sum += ftable[idx].powf(beta) * prod;
+                        // Factor potential (log) * beta + incoming messages (log)
+                        log_terms.push(ftable[idx] * beta + term);
 
                         if !next_assignment(&mut current_assignment, domain_size, i) {
                             break;
                         }
                     }
 
-                    new_messages.insert((factor.id, vid, s), sum);
+                    let new_val_log = logsumexp(&log_terms);
+                    new_messages.insert((factor.id, vid, s), new_val_log);
                 }
             }
         }
 
         // NB messages are probability distributions, normalize.
-        for ((from, to, _), _) in new_messages.clone().iter() {
-            let norm: f64 = (0..domain_size).map(|s| new_messages[&(*from, *to, s)]).sum();
-
-            for s in 0..domain_size {
-                let mut val = new_messages[&(*from, *to, s)];
+        // We separate updates for Var->Factor and Factor->Var to ensure consistent normalization
+        
+        // 1. Variable -> Factor edges
+        for var in &fg.variables {
+            for &fid in fg.var_to_factors.get(&var.id).unwrap() {
+                // Compute norm for this edge (u, v) over all states
+                let log_norm = logsumexp(&(0..domain_size).map(|s| new_messages[&(var.id, fid, s)]).collect::<Vec<_>>());
                 
-                // Normalize to Probability Distribution
-                if norm > 1e-12 {
-                    val /= norm;
-                } else {
-                    val = 1.0 / domain_size as f64;
-                }
+                for s in 0..domain_size {
+                    let mut val = new_messages[&(var.id, fid, s)];
+                    
+                    // Normalize
+                    if log_norm > f64::NEG_INFINITY {
+                        val -= log_norm;
+                    } else {
+                        val = init_val;
+                    }
 
-                // Apply Damping (Inertia)
-                if damping > 0.0 {
-                    let old_val = messages.get(&(*from, *to, s)).copied().unwrap_or(1.0 / domain_size as f64);
-                    val = damping * old_val + (1.0 - damping) * val;
+                    // Damping
+                    if damping > 0.0 {
+                         let old_val = messages.get(&(var.id, fid, s)).copied().unwrap_or(init_val);
+                         val = logsumexp(&[ln_damping + old_val, ln_inv_damping + val]);
+                    }
+                    new_messages.insert((var.id, fid, s), val);
                 }
-
-                new_messages.insert((*from, *to, s), val);
             }
         }
-        
+
+        // 2. Factor -> Variable edges
+        for factor in &fg.factors {
+            for &vid in &factor.variables {
+                let log_norm = logsumexp(&(0..domain_size).map(|s| new_messages[&(factor.id, vid, s)]).collect::<Vec<_>>());
+                
+                for s in 0..domain_size {
+                    let mut val = new_messages[&(factor.id, vid, s)];
+                    
+                    // Normalize
+                    if log_norm > f64::NEG_INFINITY {
+                        val -= log_norm;
+                    } else {
+                        val = init_val;
+                    }
+
+                    // Damping
+                    if damping > 0.0 {
+                         let old_val = messages.get(&(factor.id, vid, s)).copied().unwrap_or(init_val);
+                         val = logsumexp(&[ln_damping + old_val, ln_inv_damping + val]);
+                    }
+                    new_messages.insert((factor.id, vid, s), val);
+                }
+            }
+        }
+
+        // Check convergence on the damped, normalized messages
         let max_diff = new_messages
             .iter()
             .map(|(k, &v)| (v - messages.get(k).copied().unwrap_or(0.0)).abs())
@@ -259,18 +310,18 @@ pub fn ls_belief_propagation(
     let mut marginals = Vec::new();
 
     for var in &fg.variables {
-        let mut marginal = vec![1.0; domain_size];
+        let mut marginal = vec![0.0; domain_size]; // Log space accumulator
 
         for &fid in fg.var_to_factors.get(&var.id).unwrap() {
             for s in 0..domain_size {
-                marginal[s] *= messages[&(fid, var.id, s)];
+                marginal[s] += messages[&(fid, var.id, s)];
             }
         }
 
-        let norm: f64 = marginal.iter().sum();
+        let log_norm = logsumexp(&marginal);
 
         for s in 0..domain_size {
-            marginal[s] /= norm;
+            marginal[s] -= log_norm;
         }
 
         marginals.push(marginal);
@@ -597,10 +648,10 @@ mod tests {
         };
 
         // Custom Unnormalized BP for Partition Function Z (Likelihood)
-        // Note: ls_belief_propagation normalizes messages, so it computes marginals P(X_i).
-        // To get the total likelihood P(Observations), we need the normalization constant Z.
-        // We simulate a message pass similar to the forward algorithm on the graph structure.
-
+        // Note: This block uses raw probability logic for 'node_belief', 
+        // essentially a manual Forward implementation on the graph structure. 
+        // This remains valid for checking "BP Factor Graph Likelihood" computation 
+        // provided we don't assume `ls_belief_propagation` calculates Z directly.
         let mut node_belief = vec![1.0; n_states]; // Accumulator for messages arriving at current node
 
         // Pass 1: Combine Prior + Emission at X0
@@ -722,7 +773,7 @@ mod tests {
         // With depth schedule: iter 0 (forward), iter 1 (backward). Should converge in 2 passes.
         let max_iters = 25; 
         let tol = 1e-9;
-        let bp_marginals = ls_belief_propagation(&fg, max_iters, tol, None, None);
+        let bp_log_marginals = ls_belief_propagation(&fg, max_iters, tol, None, None);
 
         println!("\nMarginals Comparison:");
         println!("{:>5} | {:>15} | {:>15}", "Time", "Exact (F-B)", "BP");
@@ -730,7 +781,7 @@ mod tests {
         for t in 0..chain_len {
             for i in 0..n_states {
                 let exact = exact_marginals[t][i];
-                let bp = bp_marginals[t][i]; // Variable ids match time index t
+                let bp = bp_log_marginals[t][i].exp(); // Convert log to prob for comparison
                 let diff = (exact - bp).abs();
                 
                 println!("{:>5} | State {}: {:.6} | {:.6}", t, i, exact, bp);
@@ -820,7 +871,6 @@ mod tests {
             let right = 2 * (p - nleaves) + 1;
             
             // Edge p -> left
-            // Table should be p (row) -> left (col)
             add_factor(vec![p, left], pairwise_table.clone(), FactorType::Transition);
             
             // Edge p -> right
@@ -839,7 +889,7 @@ mod tests {
         // Tree diameter: approx 2 * log2(8) = 6.
         let max_iters = 10;
         let tol = 1e-9;
-        let bp_marginals = ls_belief_propagation(&fg, max_iters, tol, None, None);
+        let bp_log_marginals = ls_belief_propagation(&fg, max_iters, tol, None, None);
 
         // 6. Compare
         println!("\nTree Marginals Comparison (Leaves and Root):");
@@ -850,7 +900,7 @@ mod tests {
         for &id in &nodes_to_check {
              for s in 0..ncolor {
                 let exact = exact_marginals[id][s];
-                let bp = bp_marginals[id][s];
+                let bp = bp_log_marginals[id][s].exp(); // Convert log to prob
                 let diff = (exact - bp).abs();
                 println!("{:>5} | State {}: {:.6} | {:.6}", id, s, exact, bp);
                 assert!(diff < 1e-5, "Mismatch at node {}, state {}: exact={}, bp={}", id, s, exact, bp);
@@ -860,8 +910,8 @@ mod tests {
 
         // Global check
         let max_diff = exact_marginals.iter().flatten()
-            .zip(bp_marginals.iter().flatten())
-            .map(|(a, b)| (a - b).abs())
+            .zip(bp_log_marginals.iter().flatten())
+            .map(|(a, b)| (a - b.exp()).abs())
             .fold(0.0, f64::max);
         
         println!("Max difference over all nodes: {:.3e}", max_diff);
@@ -931,36 +981,42 @@ mod tests {
             domain_size,
         };
 
-        // 3. Brute Force Exact Solution
-        let mut joint_prob = vec![0.0; 1 << n_vars];
-        let mut total_z = 0.0;
+        // 3. Brute Force Exact Solution (Log Domain)
+        let mut joint_log_prob = vec![0.0; 1 << n_vars];
 
         for i in 0..(1 << n_vars) {
             let x = vec![(i >> 0) & 1, (i >> 1) & 1, (i >> 2) & 1]; // x0, x1, x2
             
-            let mut p = 1.0;
+            let mut log_p = 0.0;
             // Unary
             for v in 0..n_vars {
-                p *= unary_tables[v][x[v]];
+                log_p += unary_tables[v][x[v]].ln();
             }
             // Pairwise
             for &(u, v) in &edges {
                 // Determine factor table index. Assuming factor vars are [u, v].
                 // Row major: x[u]*2 + x[v]
                 let idx = x[u] * 2 + x[v];
-                p *= pairwise_tables[&(u, v)][idx];
+                log_p += pairwise_tables[&(u, v)][idx].ln();
             }
             
-            joint_prob[i] = p;
-            total_z += p;
+            joint_log_prob[i] = log_p;
         }
 
-        let mut exact_marginals = vec![vec![0.0; domain_size]; n_vars];
-        for i in 0..(1 << n_vars) {
-            let prob = joint_prob[i] / total_z;
-            let x = vec![(i >> 0) & 1, (i >> 1) & 1, (i >> 2) & 1];
-            for v in 0..n_vars {
-                exact_marginals[v][x[v]] += prob;
+        let total_log_z = logsumexp(&joint_log_prob);
+
+        let mut exact_log_marginals = vec![vec![f64::NEG_INFINITY; domain_size]; n_vars];
+        
+        for v in 0..n_vars {
+            for s in 0..domain_size {
+                let mut logs_for_state = Vec::new();
+                for i in 0..(1 << n_vars) {
+                    let x_v = (i >> v) & 1;
+                    if x_v == s {
+                        logs_for_state.push(joint_log_prob[i]);
+                    }
+                }
+                exact_log_marginals[v][s] = logsumexp(&logs_for_state) - total_log_z;
             }
         }
 
@@ -969,19 +1025,28 @@ mod tests {
         let max_iters = 100;
         let tol = 1e-9;
         // Use default beta (1.0) and some damping (0.6)
-        let bp_marginals = ls_belief_propagation(&fg, max_iters, tol, None, Some(0.6));
+        let bp_log_marginals = ls_belief_propagation(&fg, max_iters, tol, None, Some(0.6));
 
         // 5. Compare
-        println!("\nMRF Small Loop Comparison (Exact vs BP):");
+        println!("\nMRF Small Loop Comparison (Exact vs BP) in Log Domain:");
         let mut max_diff = 0.0;
         for v in 0..n_vars {
-            println!("Var {}: Exact {:?}, BP {:?}", v, exact_marginals[v], bp_marginals[v]);
+            let bp_logs = &bp_log_marginals[v];
+            let exact_logs = &exact_log_marginals[v];
+            
+            // For display convert to prob
+            let bp_probs: Vec<f64> = bp_logs.iter().map(|x| x.exp()).collect();
+            let exact_probs: Vec<f64> = exact_logs.iter().map(|x| x.exp()).collect();
+
+            println!("Var {}: Exact Prob {:?}, BP Prob {:?}", v, exact_probs, bp_probs);
+            println!("       Exact Log  {:?}, BP Log  {:?}", exact_logs, bp_logs);
+
             for s in 0..domain_size {
-                let diff = (exact_marginals[v][s] - bp_marginals[v][s]).abs();
+                let diff = (exact_logs[s] - bp_logs[s]).abs();
                 if diff > max_diff { max_diff = diff; }
             }
         }
-        println!("Max Diff: {:.6e}", max_diff);
+        println!("Max Log Diff: {:.6e}", max_diff);
         
         // Note: LBP is not exact for loops, but for small random potentials it's usually decent.
         // We assert reasonable closeness.
