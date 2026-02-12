@@ -72,17 +72,24 @@ type Message = HashMap<(usize, usize, usize), f64>;
 /// * `max_iters` - Maximum number of iterations for loopy belief propagation.
 /// * `tol` - Convergence tolerance for message updates.
 /// * `beta` - Inverse temperature (1.0 for standard BP, Infinity for Max-Product).
+/// * `damping` - Inertia for message updates (0.0 = no damping, 1.0 = no updates).
 pub fn ls_belief_propagation(
     fg: &FactorGraph,
     max_iters: usize,
     tol: f64,
     beta: Option<f64>,
+    damping: Option<f64>,
 ) -> Vec<Vec<f64>> {
 
-    let beta: f64 = beta.unwrap_or(1.0);
+    let target_beta: f64 = beta.unwrap_or(1.0);
+    // Beta starts lower if annealing is implicitly desired via iteration count (typically for loopy graphs)
+    // or if we just want to stabilize early iterations.
+    let mut beta = target_beta;
+    
+    let damping = damping.unwrap_or(0.0);
     let domain_size = fg.domain_size;
 
-    println!("Solving belief propagation");
+    println!("Solving belief propagation with beta={:.2}, damping={:.2}", target_beta, damping);
 
     // Check if we can use an ordered schedule based on depth
     let use_depth_schedule = fg.variables.iter().all(|v| v.depth.is_some());
@@ -117,6 +124,16 @@ pub fn ls_belief_propagation(
     // NB converges in t*, diameter of the tree (max. node to node distance),
     //    i.e. 2log_2 num. leaves for a fully balanced (ultrametric) binary tree.
     for iter in 0..max_iters {
+        
+        // Beta Annealing: Ramp up beta from small value to target_beta over first 50% of iterations
+        // This helps escape poor local minima / unstable initial conditions in loopy graphs.
+        if iter < max_iters / 2 {
+            let progress = (iter + 1) as f64 / (max_iters as f64 / 2.0);
+            beta = target_beta * progress.max(0.1); 
+        } else {
+            beta = target_beta;
+        }
+
         let mut new_messages = messages.clone(); // Shallow clone of map structure, new values inserted
 
         // Define the order of variables for updates
@@ -204,7 +221,21 @@ pub fn ls_belief_propagation(
             let norm: f64 = (0..domain_size).map(|s| new_messages[&(*from, *to, s)]).sum();
 
             for s in 0..domain_size {
-                let val = new_messages[&(*from, *to, s)] / norm;
+                let mut val = new_messages[&(*from, *to, s)];
+                
+                // Normalize to Probability Distribution
+                if norm > 1e-12 {
+                    val /= norm;
+                } else {
+                    val = 1.0 / domain_size as f64;
+                }
+
+                // Apply Damping (Inertia)
+                if damping > 0.0 {
+                    let old_val = messages.get(&(*from, *to, s)).copied().unwrap_or(1.0 / domain_size as f64);
+                    val = damping * old_val + (1.0 - damping) * val;
+                }
+
                 new_messages.insert((*from, *to, s), val);
             }
         }
@@ -691,7 +722,7 @@ mod tests {
         // With depth schedule: iter 0 (forward), iter 1 (backward). Should converge in 2 passes.
         let max_iters = 25; 
         let tol = 1e-9;
-        let bp_marginals = ls_belief_propagation(&fg, max_iters, tol, None);
+        let bp_marginals = ls_belief_propagation(&fg, max_iters, tol, None, None);
 
         println!("\nMarginals Comparison:");
         println!("{:>5} | {:>15} | {:>15}", "Time", "Exact (F-B)", "BP");
@@ -808,7 +839,7 @@ mod tests {
         // Tree diameter: approx 2 * log2(8) = 6.
         let max_iters = 10;
         let tol = 1e-9;
-        let bp_marginals = ls_belief_propagation(&fg, max_iters, tol, None);
+        let bp_marginals = ls_belief_propagation(&fg, max_iters, tol, None, None);
 
         // 6. Compare
         println!("\nTree Marginals Comparison (Leaves and Root):");
@@ -934,9 +965,11 @@ mod tests {
         }
 
         // 4. Run Belief Propagation
+        // Small MRF loop can be tricky. Damping helps.
         let max_iters = 100;
         let tol = 1e-9;
-        let bp_marginals = ls_belief_propagation(&fg, max_iters, tol, None);
+        // Use default beta (1.0) and some damping (0.6)
+        let bp_marginals = ls_belief_propagation(&fg, max_iters, tol, None, Some(0.6));
 
         // 5. Compare
         println!("\nMRF Small Loop Comparison (Exact vs BP):");
