@@ -5,6 +5,7 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 use crate::utils::logsumexp;
 use crate::hmm::{HMM, get_test_hmm};
+use crate::potts::get_test_potts;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VariableType { Latent, Emission }
@@ -282,6 +283,7 @@ fn compute_factor_message(
 mod tests {
     use super::*;
     use crate::hmm::HMM;
+    use crate::potts::get_test_potts;
 
     #[test]
     fn test_rng() {
@@ -515,109 +517,41 @@ mod tests {
 
     #[test]
     fn test_hmrf_marginals() {
-        // 3x3 loopy belief propagation.
-        // 
-        // 0 -- 1 -- 2
-        // |    |    |
-        // 3 -- 4 -- 5
-        // |    |    |
-        // 6 -- 7 -- 8
-        
+        // 3x3 loopy belief propagation using Potts model
         let width = 3;
         let height = 3;
-        let num_vars = width * height;
         let n_states = 2; // Binary grid
-
-        // NB this will be the node adjacency?
-        let mut edges = Vec::new();
-        // Horizontal edges
-        for r in 0..height {
-            for c in 0..width - 1 {
-                let u = r * width + c;
-                let v = r * width + c + 1;
-                edges.push((u, v));
-            }
-        }
-        // Vertical edges
-        for r in 0..height - 1 {
-            for c in 0..width {
-                let u = r * width + c;
-                let v = (r + 1) * width + c;
-                edges.push((u, v));
-            }
-        }
-
-        // Deterministic emissions (Unary); one per site.
-        let mut emissions = Vec::with_capacity(num_vars);
-        for i in 0..num_vars {
-            let p = 0.6 + ((i as f64 * 0.1) % 0.3); // Biased towards state 0
-            emissions.push(vec![p, 1.0 - p]);
-        }
-
-        // Deterministic pairwise potentials (Potts/Ising model-like); one per edge.
-        // Strong coupling to make loops relevant; i.e. p if same, 1-p if different.
         let coupling_prob: f64 = 0.8; 
-        let pairwise_table = [coupling_prob, 1.0 - coupling_prob, 1.0 - coupling_prob, coupling_prob];
 
-        // 1. Brute Force Exact Inference
-        // 2^9 = 512 total configurations. Slightly larger but instant.
-        let mut exact_marginals = vec![vec![0.0; n_states]; num_vars];
-        let mut total_prob = 0.0;
+        let potts = get_test_potts(width, height, n_states, coupling_prob);
+        let exact_marginals = potts.exact_marginals();
 
-        for config_idx in 0..(1 << num_vars) {
-            let mut config = vec![0; num_vars];
-            for i in 0..num_vars {
-                if (config_idx >> i) & 1 == 1 {
-                    config[i] = 1;
-                }
-            }
+        let num_vars = potts.num_vars();
+        let edges = &potts.edges;
 
-            let mut log_prob = 0.0;
-            // Unary
-            for i in 0..num_vars {
-                log_prob += emissions[i][config[i]].ln();
-            }
-            // Pairwise
-            for &(u, v) in &edges {
-                let table_idx = config[u] * n_states + config[v];
-                log_prob += pairwise_table[table_idx].ln();
-            }
-
-            let prob = log_prob.exp();
-            total_prob += prob;
-
-            for i in 0..num_vars {
-                exact_marginals[i][config[i]] += prob;
-            }
-        }
-        
-        // Normalize
-        for i in 0..num_vars {
-            for s in 0..n_states {
-                exact_marginals[i][s] /= total_prob;
-            }
-        }
-
-        // 2. Build Factor Graph / Run Loopy BP
         let mut fg = FactorGraph::new(num_vars, n_states);
         
         for i in 0..num_vars {
-            fg.add_factor(vec![i], emissions[i].iter().map(|p| p.ln()).collect(), FactorType::Emission);
+            fg.add_factor(vec![i], potts.emissions[i].iter().map(|p| p.ln()).collect(), FactorType::Emission);
         }
 
+        let pairwise_table = [coupling_prob, 1.0 - coupling_prob, 1.0 - coupling_prob, coupling_prob];
         let pw_log: Vec<f64> = pairwise_table.iter().map(|p| p.ln()).collect();
 
         // NB reference count the pairwise table since it's shared across all edges for memory efficiency.
         let pw_log_rc = Rc::new(pw_log);
 
-        for &(u, v) in &edges {
+        for &(u, v) in edges {
             fg.add_shared_factor(vec![u, v], pw_log_rc.clone(), FactorType::Transition);
         }
+
+        println!("Running Loopy Belief Propagation on {}x{} grid...", width, height);
         
         // Loopy BP is approximate and iterative.
         let bp_marginals_log = fg.run_belief_propagation(100, 1e-5, 0.0);
 
         // 3. Compare (Expect deviations due to loops, but should be correlated)
+        println!("Comparing Marginals (Exact vs Loopy BP):");
         let mut max_diff = 0.0;
         
         for i in 0..num_vars {

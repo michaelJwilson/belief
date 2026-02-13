@@ -7,4 +7,5 @@
 // NB declare the public modules.
 pub mod utils;
 pub mod hmm;
+pub mod potts;
 pub mod belief;
