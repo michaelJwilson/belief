@@ -95,7 +95,7 @@ impl FactorGraph {
         marginals
     }
 
-    pub fn run_belief_propagation(&mut self, max_iters: usize, tolerance: f64, dropout_rate: f64, alpha: f64) -> Vec<Vec<f64>>{
+    pub fn run_belief_propagation(&mut self, max_iters: usize, tolerance: f64, max_dropout_rate: f64, alpha: f64) -> Vec<Vec<f64>>{
         let mut queue = VecDeque::new();
 
         for factor in &self.factors {
