@@ -518,8 +518,8 @@ mod tests {
     #[test]
     fn test_hmrf_marginals() {
         // 3x3 loopy belief propagation using Potts model
-        let width = 3;
-        let height = 3;
+        let width = 4;
+        let height = 4;
         let n_states = 2; // Binary grid
         let coupling_prob: f64 = 0.8; 
 
