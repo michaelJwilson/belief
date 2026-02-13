@@ -473,8 +473,7 @@ mod tests {
                 exact_marginals[i][config[i]] += prob;
             }
         }
-
-        // Normalize exact marginals
+        
         for i in 0..num_vars {
             for s in 0..n_states {
                 exact_marginals[i][s] /= total_prob;
@@ -496,8 +495,6 @@ mod tests {
 
         println!("Running Belief Propagation on Tree (Nodes={})...", num_vars);
         let bp_marginals_log = fg.run_belief_propagation(50, 1e-6, 0.0);
-
-        // 3. Compare
 
         for i in 0..num_vars {
             let m_log = &bp_marginals_log[i];
@@ -551,7 +548,6 @@ mod tests {
         let bp_marginals_log = fg.run_belief_propagation(100, 1e-5, 0.0);
 
         // 3. Compare (Expect deviations due to loops, but should be correlated)
-        println!("Comparing Marginals (Exact vs Loopy BP):");
         let mut max_diff = 0.0;
         
         for i in 0..num_vars {
