@@ -12,7 +12,7 @@ use crate::tree::get_test_tree;
 pub enum VariableType { Latent, Emission }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FactorType { Emission, Transition, Prior }
+pub enum FactorType { Prior, Emission, Transition }
 
 #[derive(Debug, Clone)]
 pub struct Factor {
@@ -103,12 +103,20 @@ impl FactorGraph {
                 self.var_to_factor.entry((var, factor.id)).or_insert_with(|| vec![0.0; self.domain_size]);
                 self.factor_to_var.entry((factor.id, var)).or_insert_with(|| vec![0.0; self.domain_size]);
                 
-                // NB Only schedule FactorToVar initially. Factors hold local potentials (emissions, priors).
-                //    These messages will disperse information to variables, triggering VarToFactor updates
-                //    where necessary. Scheduling VarToFactor here is redundant as they start with no info.
-                queue.push_back(WorkItem::FactorToVar { factor_id: factor.id, var_id: var });
+                // NB Only schedule specific "source" factors (Priors/Emissions) initially.
+                //    Transition factors will be scheduled automatically when their adjacent
+                //    variables receive information from these sources.
+                match factor.factor_type {
+                    FactorType::Prior | FactorType::Emission => {
+                        queue.push_back(WorkItem::FactorToVar { factor_id: factor.id, var_id: var });
+                    },
+                    _ => {} // Transition/Custom factors wait for input.
+                }
             }
         }
+
+        // NB set a reasonable upper bound on iterations to prevent infinite loops in pathological cases.
+        let max_iters = max_iters.max(1);
 
         let mut iters = 0;
         let mut success = 1;
