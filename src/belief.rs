@@ -103,18 +103,18 @@ impl FactorGraph {
                 self.var_to_factor.entry((var, factor.id)).or_insert_with(|| vec![0.0; self.domain_size]);
                 self.factor_to_var.entry((factor.id, var)).or_insert_with(|| vec![0.0; self.domain_size]);
                 
-                queue.push_back(WorkItem::VarToFactor { var_id: var, factor_id: factor.id });
+                // NB Only schedule FactorToVar initially. Factors hold local potentials (emissions, priors).
+                //    These messages will disperse information to variables, triggering VarToFactor updates
+                //    where necessary. Scheduling VarToFactor here is redundant as they start with no info.
                 queue.push_back(WorkItem::FactorToVar { factor_id: factor.id, var_id: var });
             }
         }
 
-        // NB set a reasonable upper bound on iterations to prevent infinite loops in pathological cases.
         let mut iters = 0;
         let mut success = 1;
 
         // NB pop one Var->Factor or Factor->Var message update to process.
         while let Some(item) = queue.pop_front() {
-            iters += 1;
             if iters > max_iters { 
                 success = 0;   
                 break; 
@@ -224,6 +224,8 @@ impl FactorGraph {
                     }
                 }
             }
+
+            iters += 1;
         }
 
         println!("BP terminated with success={} in {} iterations ( {} [|variables|] iterations).", success, iters, iters / self.factors.len().max(1));
