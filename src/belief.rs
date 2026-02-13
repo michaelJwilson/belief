@@ -496,7 +496,7 @@ mod tests {
         let bp_marginals_log = fg.run_belief_propagation(50, 1e-6, 0.0);
 
         // 3. Compare
-        println!("Comparing Marginals (Exact vs BP):");
+
         for i in 0..num_vars {
             let m_log = &bp_marginals_log[i];
             let max_v = m_log.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
@@ -613,15 +613,11 @@ mod tests {
         for &(u, v) in &edges {
             fg.add_shared_factor(vec![u, v], pw_log_rc.clone(), FactorType::Transition);
         }
-
-        println!("Running Loopy Belief Propagation on 3x3 Grid...");
         
         // Loopy BP is approximate and iterative.
-        fg.run_belief_propagation(100, 1e-5, 0.0);
-        let bp_marginals_log = fg.calculate_marginals();
+        let bp_marginals_log = fg.run_belief_propagation(100, 1e-5, 0.0);
 
         // 3. Compare (Expect deviations due to loops, but should be correlated)
-        println!("Comparing Marginals (Exact vs Loopy BP):");
         let mut max_diff = 0.0;
         
         for i in 0..num_vars {
