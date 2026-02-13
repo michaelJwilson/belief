@@ -12,7 +12,7 @@ use crate::tree::get_test_tree;
 pub enum VariableType { Latent, Emission }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FactorType { Emission, Transition, Prior, Custom }
+pub enum FactorType { Emission, Transition, Prior }
 
 #[derive(Debug, Clone)]
 pub struct Factor {
