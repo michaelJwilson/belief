@@ -29,7 +29,7 @@ struct GraphState {
 }
 
 // NB Thread-safe sharing of the state (messages) with a Atomic Reference Count.
-pub struct AsyncFactorGraph {
+pub struct ArcFactorGraph {
     pub factors: Vec<Factor>,
     pub var_adj: Vec<Vec<usize>>, 
     pub domain_size: usize,
@@ -37,7 +37,7 @@ pub struct AsyncFactorGraph {
     state: Arc<GraphState>,
 }
 
-impl AsyncFactorGraph {
+impl ArcFactorGraph {
     pub fn new(num_vars: usize, domain_size: usize) -> Self {
         let mut var_adj = Vec::with_capacity(num_vars);
         for _ in 0..num_vars {
@@ -87,7 +87,7 @@ impl AsyncFactorGraph {
         if let Some(state_mut) = Arc::get_mut(&mut self.state) {
             state_mut.factor_outgoing.push(RwLock::new(f_msgs));
         } else {
-            panic!("Cannot add factors to AsyncFactorGraph after initial declaration.");
+            panic!("Cannot add factors to ArcFactorGraph after initial declaration.");
         }
 
         self.factors.push(Factor { id, variables, table, factor_type });
@@ -167,7 +167,7 @@ impl AsyncFactorGraph {
 }
 
 fn process_var_to_factor(
-    graph: &AsyncFactorGraph,
+    graph: &ArcFactorGraph,
     var_id: usize,
     factor_id: usize,
     tolerance: f64,
@@ -245,7 +245,7 @@ fn process_var_to_factor(
 }
 
 fn process_factor_to_var(
-    graph: &AsyncFactorGraph,
+    graph: &ArcFactorGraph,
     factor_id: usize,
     var_id: usize,
     tolerance: f64,
@@ -371,7 +371,7 @@ mod tests {
 
         let exact_marginals = hmm.marginals(&obs);
 
-        let mut fg = AsyncFactorGraph::new(chain_len, n_states);
+        let mut fg = ArcFactorGraph::new(chain_len, n_states);
         fg.add_factor(vec![0], prior.iter().map(|x| x.ln()).collect(), FactorType::Prior);
 
         let trans_log: Vec<f64> = trans.iter().map(|x| x.ln()).collect();
@@ -423,7 +423,7 @@ mod tests {
         
         println!("Running with {} Rayon worker threads", rayon::current_num_threads());
 
-        let mut fg = AsyncFactorGraph::new(num_vars, n_states);
+        let mut fg = ArcFactorGraph::new(num_vars, n_states);
         let alpha = 1.0;
         for i in 0..num_vars {
             fg.add_factor(vec![i], tree.emissions[i].iter().map(|p| p.ln()).collect(), FactorType::Emission);
@@ -460,7 +460,7 @@ mod tests {
         let exact_marginals = potts.exact_marginals();
         let num_vars = potts.num_vars();
         let edges = &potts.edges;
-        let mut fg = AsyncFactorGraph::new(num_vars, n_states);
+        let mut fg = ArcFactorGraph::new(num_vars, n_states);
         let alpha = 1.0;
         for i in 0..num_vars {
             fg.add_factor(vec![i], potts.emissions[i].iter().map(|p| p.ln()).collect(), FactorType::Emission);
@@ -519,7 +519,7 @@ mod tests {
 
             let edges = &potts.edges;
 
-            let mut fg = AsyncFactorGraph::new(num_vars, n_states);
+            let mut fg = ArcFactorGraph::new(num_vars, n_states);
 
             for i in 0..num_vars {
                 fg.add_factor(vec![i], potts.emissions[i].iter().map(|p| p.ln()).collect(), FactorType::Emission);
