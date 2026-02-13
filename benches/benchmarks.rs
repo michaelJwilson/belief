@@ -65,7 +65,8 @@ fn bench_bp(c: &mut Criterion) {
     let mut group = c.benchmark_group("BeliefPropagation");
     let n_states = 2;
 
-    for size in [10].iter() {
+    {
+        let size = &10;
         group.bench_with_input(BenchmarkId::new("Chain", size), size, |b, &size| {
             b.iter_batched(
                 || build_chain(size, n_states),
@@ -75,7 +76,8 @@ fn bench_bp(c: &mut Criterion) {
         });
     }
 
-    for layers in [10].iter() {
+    {
+        let layers = &10;
         let n_vars = (1 << layers) - 1;
         group.bench_with_input(BenchmarkId::new("Tree", n_vars), layers, |b, &layers| {
             b.iter_batched(
@@ -86,7 +88,8 @@ fn bench_bp(c: &mut Criterion) {
         });
     }
 
-    for dim in [10].iter() {
+    {
+        let dim = &10;
         let n_vars = dim * dim;
         group.bench_with_input(BenchmarkId::new("HMRF", n_vars), dim, |b, &dim| {
             b.iter_batched(

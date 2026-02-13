@@ -104,7 +104,7 @@ impl FactorGraph {
                     
                     if diff > tolerance {
                         *entry = incoming;
-                        // Schedule neighbors
+
                         let factor = &self.factors[factor_id];
                         for &n_var in &factor.variables {
                             if n_var != var_id {
@@ -166,13 +166,11 @@ impl FactorGraph {
     }
 }
 
-/// Normalize log-probabilities by subtracting LSE
 fn normalize_log_msg(msg: &mut [f64]) {
     let lse = logsumexp(msg);
     for x in msg { *x -= lse; }
 }
 
-/// Compute outgoing message from Factor to Variable
 fn compute_factor_message(
     factor: &Factor,
     target_var_idx: usize, // Index in factor.variables
@@ -238,10 +236,10 @@ mod tests {
         let n_states: usize = 2;
         let chain_len: usize = 5;
 
-        let trans = vec![0.6, 0.4, 0.3, 0.7];
-        let emit = vec![0.8, 0.2, 0.1, 0.9];
-        let prior = vec![0.6, 0.4];
-        let obs = vec![0, 1, 0, 1, 0];
+        let trans = [0.6, 0.4, 0.3, 0.7];
+        let emit = [0.8, 0.2, 0.1, 0.9];
+        let prior = [0.6, 0.4];
+        let obs = [0, 1, 0, 1, 0];
 
         // 1. Standard Forward-Backward Calculation for Validation
         let mut alpha = vec![vec![0.0; n_states]; chain_len];
@@ -343,11 +341,9 @@ mod tests {
         
         let num_vars = 7;
         let n_states = 2;
-        let edges = vec![
-            (0, 1), (0, 2),
+        let edges = [(0, 1), (0, 2),
             (1, 3), (1, 4),
-            (2, 5), (2, 6)
-        ];
+            (2, 5), (2, 6)];
 
         // Deterministic emissions (unary potentials)
         let mut emissions = Vec::with_capacity(num_vars);
@@ -483,7 +479,7 @@ mod tests {
         // Deterministic pairwise potentials (Potts/Ising model-like)
         // Strong coupling to make loops relevant
         let coupling_prob: f64 = 0.8; 
-        let pairwise_table = vec![coupling_prob, 1.0 - coupling_prob, 1.0 - coupling_prob, coupling_prob];
+        let pairwise_table = [coupling_prob, 1.0 - coupling_prob, 1.0 - coupling_prob, coupling_prob];
 
         // 1. Brute Force Exact Inference
         // 2^9 = 512 total configurations. Slightly larger but instant.
