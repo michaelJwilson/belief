@@ -5,5 +5,6 @@
 #![allow(unused_variables)]
 
 // NB declare the public modules.
-pub mod belief;
 pub mod utils;
+pub mod hmm;
+pub mod belief;

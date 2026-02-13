@@ -4,6 +4,7 @@ use rand::prelude::*;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use crate::utils::logsumexp;
+use crate::hmm::HMM;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VariableType { Latent, Emission }
@@ -278,6 +279,7 @@ fn compute_factor_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hmm::HMM;
 
     #[test]
     fn test_rng() {
@@ -350,46 +352,16 @@ mod tests {
         let chain_len: usize = 5;
 
         // NB each state can emit two emission characters [0 or 1].
-        let emit = [0.8, 0.2, 0.1, 0.9];
-        let trans = [0.6, 0.4, 0.3, 0.7];
-        let prior = [0.6, 0.4];
+        let emit = vec![0.8, 0.2, 0.1, 0.9];
+        let trans = vec![0.6, 0.4, 0.3, 0.7];
+        let prior = vec![0.6, 0.4];
         
         // NB observed 2-state sequence.        
-        let obs = [0, 1, 0, 1, 0];
+        let obs = vec![0, 1, 0, 1, 0];
 
-        // 1. Standard Forward-Backward Calculation for Validation
-        let mut alpha = vec![vec![0.0; n_states]; chain_len];
-        // NB initial alpha is prior * emission for first obs; normalized over states.
-        for i in 0..n_states { alpha[0][i] = prior[i] * emit[i * 2 + obs[0]]; }
-
-        let s0: f64 = alpha[0].iter().sum();
-        for v in &mut alpha[0] { *v /= s0; }
-
-        // NB march up the chain.
-        for t in 1..chain_len {
-            for j in 0..n_states {
-                let mut p = 0.0;
-                for i in 0..n_states { p += alpha[t-1][i] * trans[i * n_states + j]; }
-                alpha[t][j] = p * emit[j * 2 + obs[t]];
-            }
-            let st: f64 = alpha[t].iter().sum();
-            for v in &mut alpha[t] { *v /= st; }
-        }
-
-        let mut beta = vec![vec![0.0; n_states]; chain_len];
-        for i in 0..n_states { beta[chain_len-1][i] = 1.0; }
-
-        for t in (0..chain_len-1).rev() {
-            for i in 0..n_states {
-                let mut sum = 0.0;
-                for j in 0..n_states {
-                    sum += trans[i * n_states + j] * emit[j * 2 + obs[t+1]] * beta[t+1][j];
-                }
-                beta[t][i] = sum;
-            }
-            let sb: f64 = beta[t].iter().sum();
-            for v in &mut beta[t] { *v /= sb; }
-        }
+        // 1. Standard Forward-Backward Calculation for Validation using HMM struct
+        let hmm = HMM::new(n_states, trans.clone(), emit.clone(), prior.clone());
+        let exact_marginals = hmm.marginals(&obs);
         
         // NB Construct the factor graph.
         let mut fg = FactorGraph::new(chain_len, n_states);
@@ -420,14 +392,8 @@ mod tests {
         assert_eq!(bp_marginals_log.len(), chain_len);
         
         for t in 0..chain_len {
-             // NB marginals from Forward-Backward.
-             let mut mj = vec![0.0; n_states];
-             let mut mj_sum = 0.0;
-             for i in 0..n_states {
-                 mj[i] = alpha[t][i] * beta[t][i];
-                 mj_sum += mj[i];
-             }
-             for i in 0..n_states { mj[i] /= mj_sum; }
+             // NB marginals from Forward-Backward via HMM struct.
+             let mj = &exact_marginals[t];
 
              // Convert BP log marginals to prob
              let m_log = &bp_marginals_log[t];
