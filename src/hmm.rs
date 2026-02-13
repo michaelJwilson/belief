@@ -119,7 +119,7 @@ pub fn get_test_hmm(n_states: usize, chain_len: usize) -> (HMM, Vec<usize>) {
     for i in 0..n_states {
         // State i emits 0 with prob p, 1 with prob 1-p
         let p = 0.1 + 0.8 * ((i % 2) as f64); // Alternating bias
-        emit[i * obs_domain + 0] = p;
+        emit[i * obs_domain] = p;
         emit[i * obs_domain + 1] = 1.0 - p;
     }
 
@@ -137,7 +137,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_hmm_marginals() {
+    fn test_hmm_exact_marginals() {
         // NB exact inference is 2^N=32 configs for N=5.
         let n_states: usize = 2;
         let chain_len: usize = 5;

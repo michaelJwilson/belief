@@ -64,12 +64,10 @@ impl Potts {
                 let sv = config[v];
                 let prob = if su == sv {
                     self.coupling_prob
+                } else if self.n_states == 2 {
+                    1.0 - self.coupling_prob
                 } else {
-                    if self.n_states == 2 {
-                        1.0 - self.coupling_prob
-                    } else {
-                        (1.0 - self.coupling_prob) / (self.n_states as f64 - 1.0)
-                    }
+                    (1.0 - self.coupling_prob) / (self.n_states as f64 - 1.0)
                 };
                 log_prob += prob.ln();
             }
@@ -116,7 +114,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_potts_marginals() {
+    fn test_potts_exact_marginals() {
         let width = 3;
         let height = 3;
         let n_states = 2; // Binary grid
