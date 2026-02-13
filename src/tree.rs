@@ -80,18 +80,32 @@ pub fn get_test_tree(num_vars: usize, n_states: usize, seed: u64) -> Tree {
         }
     }
 
+    // Identify non-leaf (internal) nodes
+    let mut is_internal = vec![false; num_vars];
+    for &(u, _) in &edges {
+        is_internal[u] = true;
+    }
+
     // Generate Emissions
     let mut emissions = Vec::with_capacity(num_vars);
-    for _ in 0..num_vars {
-        let mut row = vec![0.0; n_states];
-        let mut sum = 0.0;
-        for j in 0..n_states {
-            let p: f64 = rng.random();
-            row[j] = p;
-            sum += p;
+    for i in 0..num_vars {
+        if is_internal[i] {
+            // Uniform emissions for internal nodes (1.0 in log domain becomes 0.0, probability 1/n)
+            // Or just equal probability: 1.0 / n_states
+            let p_uniform = 1.0 / n_states as f64;
+            emissions.push(vec![p_uniform; n_states]);
+        } else {
+            // Random emissions for leaf nodes
+            let mut row = vec![0.0; n_states];
+            let mut sum = 0.0;
+            for j in 0..n_states {
+                let p: f64 = rng.random();
+                row[j] = p;
+                sum += p;
+            }
+            for j in 0..n_states { row[j] /= sum; }
+            emissions.push(row);
         }
-        for j in 0..n_states { row[j] /= sum; }
-        emissions.push(row);
     }
 
     // Generate Pairwise

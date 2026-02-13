@@ -6,6 +6,7 @@ use rand::SeedableRng;
 use crate::utils::logsumexp;
 use crate::hmm::{HMM, get_test_hmm};
 use crate::potts::get_test_potts;
+use crate::tree::get_test_tree;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VariableType { Latent, Emission }
@@ -284,6 +285,7 @@ mod tests {
     use super::*;
     use crate::hmm::HMM;
     use crate::potts::get_test_potts;
+    use crate::tree::get_test_tree;
 
     #[test]
     fn test_rng() {
@@ -410,92 +412,30 @@ mod tests {
     #[test]
     fn test_tree_marginals() {
         // Construct a small binary tree:
-        //        0
-        //      /   \
-        //     1     2
-        //    / \   / \
-        //   3   4 5   6
-        
         let num_vars = 7;
         let n_states = 2;
 
-        // NB root is 0, etc.
-        let edges = [(0, 1), (0, 2),
-            (1, 3), (1, 4),
-            (2, 5), (2, 6)];
-
-        // Deterministic emissions (unary potentials)
-        let mut emissions = Vec::with_capacity(num_vars);
-        for i in 0..num_vars {
-            // Generate deterministic probabilities based on index
-            let p = 0.1 + ((i as f64 * 0.13) % 0.8);
-            emissions.push(vec![p, 1.0 - p]);
-        }
-
-        // Deterministic transitions (pairwise potentials) - simple symmetric for edges
-        let mut pairwise = Vec::with_capacity(edges.len());
-        for i in 0..edges.len() {
-             let p_stay = 0.6 + ((i as f64 * 0.05) % 0.3); // Values between 0.6 and 0.9
-             pairwise.push(vec![p_stay, 1.0 - p_stay, 1.0 - p_stay, p_stay]);
-        }
-
-        // 1. Brute Force Exact Inference
-        // Since N=7, states=2, total configs = 2^7 = 128. Feasible.
-        let mut exact_marginals = vec![vec![0.0; n_states]; num_vars];
-        let mut total_prob = 0.0;
-
-        for config_idx in 0..(1 << num_vars) {
-            let mut config = vec![0; num_vars];
-            for i in 0..num_vars {
-                if (config_idx >> i) & 1 == 1 {
-                    config[i] = 1;
-                }
-            }
-
-            // Calculate joint probability (unnormalized)
-            let mut log_prob = 0.0;
-            
-            // Unary
-            for i in 0..num_vars {
-                log_prob += emissions[i][config[i]].ln();
-            }
-
-            // Pairwise
-            for (edge_idx, &(u, v)) in edges.iter().enumerate() {
-                let table_idx = config[u] * n_states + config[v];
-                log_prob += pairwise[edge_idx][table_idx].ln();
-            }
-
-            let prob = log_prob.exp();
-            total_prob += prob;
-
-            for i in 0..num_vars {
-                exact_marginals[i][config[i]] += prob;
-            }
-        }
+        let tree = get_test_tree(num_vars, n_states, 42); // Seed for determinism
+        let exact_marginals = tree.exact_marginals();
         
-        for i in 0..num_vars {
-            for s in 0..n_states {
-                exact_marginals[i][s] /= total_prob;
-            }
-        }
-
         // 2. Factor Graph BP
         let mut fg = FactorGraph::new(num_vars, n_states);
         
-        // Add Unary Factors
+        // Add Unary Factors from Tree
         for i in 0..num_vars {
-            fg.add_factor(vec![i], emissions[i].iter().map(|p| p.ln()).collect(), FactorType::Emission);
+            fg.add_factor(vec![i], tree.emissions[i].iter().map(|p| p.ln()).collect(), FactorType::Emission);
         }
 
-        // Add Pairwise Factors
-        for (edge_idx, &(u, v)) in edges.iter().enumerate() {
-            fg.add_factor(vec![u, v], pairwise[edge_idx].iter().map(|p| p.ln()).collect(), FactorType::Transition);
+        // Add Pairwise Factors from Tree
+        for (idx, &(u, v)) in tree.edges.iter().enumerate() {
+            fg.add_factor(vec![u, v], tree.pairwise[idx].iter().map(|p| p.ln()).collect(), FactorType::Transition);
         }
 
         println!("Running Belief Propagation on Tree (Nodes={})...", num_vars);
         let bp_marginals_log = fg.run_belief_propagation(50, 1e-6, 0.0);
 
+        // 3. Compare
+        println!("Comparing Marginals (Exact vs BP):");
         for i in 0..num_vars {
             let m_log = &bp_marginals_log[i];
             let max_v = m_log.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
