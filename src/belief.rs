@@ -625,7 +625,17 @@ mod tests {
             fg.add_factor(vec![i], potts.emissions[i].iter().map(|p| p.ln()).collect(), FactorType::Emission);
         }
 
-        let pairwise_table = [coupling_prob, 1.0 - coupling_prob, 1.0 - coupling_prob, coupling_prob];
+        let mut pairwise_table = Vec::with_capacity(n_states * n_states);
+        let off_diag = (1.0 - coupling_prob) / (n_states as f64 - 1.0);
+        for i in 0..n_states {
+            for j in 0..n_states {
+                if i == j {
+                    pairwise_table.push(coupling_prob);
+                } else {
+                    pairwise_table.push(off_diag);
+                }
+            }
+        }
         let pw_log: Vec<f64> = pairwise_table.iter().map(|p| p.ln()).collect();
 
         // NB reference count the pairwise table since it's shared across all edges for memory efficiency.
@@ -637,6 +647,6 @@ mod tests {
 
         println!("Running Loopy Belief Propagation on {}x{} grid...", width, height);
         
-        let bp_marginals_log = fg.run_belief_propagation(1_000, 1e-5, max_dropout_rate, alpha);
+        let bp_marginals_log = fg.run_belief_propagation(10_000, 1e-5, max_dropout_rate, alpha);
     }
 }
