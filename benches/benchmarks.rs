@@ -1,4 +1,5 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::hint::black_box;
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use belief::belief::{FactorGraph, FactorType};
 
 fn build_chain(n_vars: usize, n_states: usize) -> FactorGraph {
@@ -64,7 +65,7 @@ fn bench_bp(c: &mut Criterion) {
     let mut group = c.benchmark_group("BeliefPropagation");
     let n_states = 2;
 
-    for size in [10, 50, 100].iter() {
+    for size in [10].iter() {
         group.bench_with_input(BenchmarkId::new("Chain", size), size, |b, &size| {
             b.iter_batched(
                 || build_chain(size, n_states),
@@ -74,7 +75,7 @@ fn bench_bp(c: &mut Criterion) {
         });
     }
 
-    for layers in [5, 7].iter() {
+    for layers in [10].iter() {
         let n_vars = (1 << layers) - 1;
         group.bench_with_input(BenchmarkId::new("Tree", n_vars), layers, |b, &layers| {
             b.iter_batched(
@@ -85,7 +86,7 @@ fn bench_bp(c: &mut Criterion) {
         });
     }
 
-    for dim in [5, 10].iter() {
+    for dim in [10].iter() {
         let n_vars = dim * dim;
         group.bench_with_input(BenchmarkId::new("HMRF", n_vars), dim, |b, &dim| {
             b.iter_batched(

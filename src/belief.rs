@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::rc::Rc;
 use crate::utils::logsumexp;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12,7 +13,7 @@ pub struct Factor {
     pub id: usize,
     pub factor_type: FactorType,
     pub variables: Vec<usize>,
-    pub table: Vec<f64>,
+    pub table: Rc<Vec<f64>>,
 }
 
 /// Forney factor graph with variables and factors connected by edges.
@@ -46,6 +47,10 @@ impl FactorGraph {
     }
 
     pub fn add_factor(&mut self, variables: Vec<usize>, table: Vec<f64>, factor_type: FactorType) {
+        self.add_shared_factor(variables, Rc::new(table), factor_type);
+    }
+
+    pub fn add_shared_factor(&mut self, variables: Vec<usize>, table: Rc<Vec<f64>>, factor_type: FactorType) {
         let id = self.factors.len();
         for &v in &variables {
             self.var_adj.entry(v).or_default().push(id);
@@ -224,6 +229,7 @@ fn next_assignment(assignment: &mut [usize], domain_size: usize, skip: usize) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::rc::Rc;
     use rand::seq::SliceRandom;
     use std::collections::HashMap;
 
@@ -275,10 +281,11 @@ mod tests {
         // Prior
         fg.add_factor(vec![0], prior.iter().map(|x| x.ln()).collect(), FactorType::Prior);
 
-        // Transitions
+        // Transitions (Shared)
         let trans_log: Vec<f64> = trans.iter().map(|x| x.ln()).collect();
+        let trans_log_rc = Rc::new(trans_log);
         for t in 0..chain_len-1 {
-            fg.add_factor(vec![t, t+1], trans_log.clone(), FactorType::Transition);
+            fg.add_shared_factor(vec![t, t+1], trans_log_rc.clone(), FactorType::Transition);
         }
 
         // Emissions (Unary factors)
@@ -525,8 +532,10 @@ mod tests {
         }
 
         let pw_log: Vec<f64> = pairwise_table.iter().map(|p| p.ln()).collect();
+        let pw_log_rc = Rc::new(pw_log);
+
         for &(u, v) in &edges {
-            fg.add_factor(vec![u, v], pw_log.clone(), FactorType::Transition);
+            fg.add_shared_factor(vec![u, v], pw_log_rc.clone(), FactorType::Transition);
         }
 
         println!("Running Loopy Belief Propagation on 3x3 Grid...");
