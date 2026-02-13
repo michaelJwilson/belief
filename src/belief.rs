@@ -1,5 +1,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
+use rand::prelude::*;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use crate::utils::logsumexp;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,14 +19,15 @@ pub struct Factor {
     pub table: Rc<Vec<f64>>,
 }
 
-/// Forney factor graph with variables and factors connected by edges.
+// NB Forney factor graph with variables and factors connected by edges.
 pub struct FactorGraph {
     pub factors: Vec<Factor>,
-    pub var_adj: HashMap<usize, Vec<usize>>,
+    pub var_adj: HashMap<usize, Vec<usize>>, // var_id -> list of adjacent factor_ids.  Deprecate?
     pub domain_size: usize,
     pub num_vars: usize,
     pub var_to_factor: HashMap<(usize, usize), Vec<f64>>, // (var_id, factor_id) -> message for s in domain.
     pub factor_to_var: HashMap<(usize, usize), Vec<f64>>, // (factor_id, var_id) -> message for s in domain.
+    pub rng: StdRng,
 }
 
 #[derive(Clone, Copy)]
@@ -41,10 +45,16 @@ impl FactorGraph {
             num_vars,
             var_to_factor: HashMap::new(),
             factor_to_var: HashMap::new(),
+            rng: StdRng::seed_from_u64(42),
         }
+    }
+    
+    pub fn set_seed(&mut self, seed: u64) {
+        self.rng = StdRng::seed_from_u64(seed);
     }
 
     pub fn add_factor(&mut self, variables: Vec<usize>, table: Vec<f64>, factor_type: FactorType) {
+        // NB constructor creates a new (reference counted) table so that it is not shared.
         self.add_shared_factor(variables, Rc::new(table), factor_type);
     }
 
@@ -60,7 +70,7 @@ impl FactorGraph {
         self.factors.push(Factor { id, variables, table, factor_type });
     }
 
-    pub fn run_belief_propagation(&mut self, max_iters: usize, tolerance: f64) {
+    pub fn run_belief_propagation(&mut self, max_iters: usize, tolerance: f64, dropout_rate: f64) {
         let mut queue = VecDeque::new();
 
         for factor in &self.factors {
@@ -68,7 +78,7 @@ impl FactorGraph {
                 self.var_to_factor.entry((var, factor.id)).or_insert_with(|| vec![0.0; self.domain_size]);
                 self.factor_to_var.entry((factor.id, var)).or_insert_with(|| vec![0.0; self.domain_size]);
                 
-                // queue.push_back(WorkItem::VarToFactor { var_id: var, factor_id: factor.id });
+                queue.push_back(WorkItem::VarToFactor { var_id: var, factor_id: factor.id });
                 queue.push_back(WorkItem::FactorToVar { factor_id: factor.id, var_id: var });
             }
         }
@@ -84,11 +94,16 @@ impl FactorGraph {
 
             match item {
                 WorkItem::VarToFactor { var_id, factor_id } => {
-                    // Update u_{x -> f}(x) = Sum_{h in N(x)\f} u_{h -> x}(x)
+                    // NB message of var j to factor a is the product of all incoming messages to var j except from a.
+                    //    In log space, this is a sum.  See eqn. (14.14) in Mezard.
                     let mut incoming = vec![0.0; self.domain_size];
+
+                    // NB 
                     if let Some(neighbors) = self.var_adj.get(&var_id) {
                          for i in 0..self.domain_size {
                              let mut sum = 0.0;
+
+                             // NB all neighbouring factors except the target factor, a.
                              for &n_fid in neighbors {
                                  if n_fid != factor_id {
                                      if let Some(msg) = self.factor_to_var.get(&(n_fid, var_id)) {
@@ -101,7 +116,11 @@ impl FactorGraph {
                     }
                     normalize_log_msg(&mut incoming);
 
+                    // NB get the old message and check for update magnitude.
                     let entry = self.var_to_factor.get_mut(&(var_id, factor_id)).unwrap();
+
+                    // NB diff is the L1 distance between the new message and the old message. If it's above tolerance,
+                    //    update & schedule neighbors.
                     let diff: f64 = incoming.iter().zip(entry.iter()).map(|(a, b)| (a - b).abs()).sum();
                     
                     if diff > tolerance {
@@ -110,30 +129,41 @@ impl FactorGraph {
                         let factor = &self.factors[factor_id];
                         for &n_var in &factor.variables {
                             if n_var != var_id {
+                                // NB support for target factor a over domain has updated, schedule all neighboring variables.
                                 queue.push_back(WorkItem::FactorToVar { factor_id, var_id: n_var });
                             }
                         }
                     }
                 }
                 WorkItem::FactorToVar { factor_id, var_id } => {
-                    // Update u_{f -> x}(x) = log Sum_{...} exp(...)
+                    // NB Sum over possible adjacent variable configurations for this factor (with target j set) of product of incoming messages
+                    //    from variables adjacent to a that are not target variable j and this factor @ the current config.  See eqn. (14.15) in Mezard.
                     let factor = &self.factors[factor_id];
                     let target_idx = factor.variables.iter().position(|&x| x == var_id).unwrap();
                     
-                    // Collect incoming Var->Factor messages
+                    // NB collect incoming messages from variables adjacent to this factor except the target variable.
+                    //    defaults to the uniform log message if no incoming message exists (e.g. at initialization).
                     let incoming_msgs: Vec<Vec<f64>> = factor.variables.iter().map(|&v| {
                         self.var_to_factor.get(&(v, factor_id)).cloned().unwrap_or_else(|| vec![0.0; self.domain_size])
                     }).collect();
 
-                    let mut new_msg = compute_factor_message(factor, target_idx, self.domain_size, &incoming_msgs);
+                    let mut new_msg = vec![0.0; self.domain_size];
+
+                    // NB Apply dropout if requested: pass uniform message with probability p.
+                    if self.rng.random::<f64>() >= dropout_rate {
+                        new_msg = compute_factor_message(factor, target_idx, self.domain_size, &incoming_msgs);
+                    }
+
                     normalize_log_msg(&mut new_msg);
 
+                    // NB get the old message and check for update magnitude.
                     let entry = self.factor_to_var.get_mut(&(factor_id, var_id)).unwrap();
                     let diff: f64 = new_msg.iter().zip(entry.iter()).map(|(a, b)| (a - b).abs()).sum();
 
                     if diff > tolerance {
                         *entry = new_msg;
-                        // Schedule neighbors
+
+                        // NB schedule adjacent variables to this factor.
                         if let Some(neighbors) = self.var_adj.get(&var_id) {
                             for &n_fid in neighbors {
                                 if n_fid != factor_id {
@@ -152,7 +182,8 @@ impl FactorGraph {
         let mut marginals = Vec::with_capacity(self.num_vars);
         for v in 0..self.num_vars {
             let mut log_prob = vec![0.0; self.domain_size];
-            // Sum all incoming Factor->Var messages
+            // NB marginal belief at a variable node v is the sum of all ln prob. messages from adjacent factors to v.  
+            //    See eqn. (14.16) in Mezard.
             if let Some(n_fids) = self.var_adj.get(&v) {
                 for &fid in n_fids {
                     if let Some(msg) = self.factor_to_var.get(&(fid, v)) {
@@ -174,49 +205,6 @@ fn normalize_log_msg(msg: &mut [f64]) {
     for x in msg { *x -= lse; }
 }
 
-fn compute_factor_message(
-    factor: &Factor,
-    target_var_idx: usize, // Index in factor.variables
-    domain_size: usize,
-    incoming_messages: &[Vec<f64>]
-) -> Vec<f64> {
-    let mut messages = vec![0.0; domain_size];
-    
-    // We iterate over the state of the target variable (the one we are sending TO)
-    for target_state in 0..domain_size {
-        let mut current_assignment = vec![0; factor.variables.len()];
-        current_assignment[target_var_idx] = target_state;
-        
-        let mut log_terms = Vec::new();
-
-        // Sum over all other variables' configurations
-        loop {
-            // Compute table index (row-major)
-            let mut idx = 0;
-            let mut stride = 1;
-            for &a in current_assignment.iter().rev() {
-                idx += a * stride;
-                stride *= domain_size;
-            }
-
-            let mut term = factor.table[idx];
-            for (j, msg) in incoming_messages.iter().enumerate() {
-                if j != target_var_idx {
-                    term += msg[current_assignment[j]]; 
-                }
-            }
-            log_terms.push(term);
-
-            if !next_assignment(&mut current_assignment, domain_size, target_var_idx) {
-                break;
-            }
-        }
-
-        messages[target_state] = logsumexp(&log_terms);
-    }
-    messages
-}
-
 fn next_assignment(assignment: &mut [usize], domain_size: usize, skip: usize) -> bool {
     // NB increment the assignment vector with each spin taking 0..domain_size,
     //    skipping a target variable.
@@ -229,30 +217,155 @@ fn next_assignment(assignment: &mut [usize], domain_size: usize, skip: usize) ->
     false
 }
 
+fn get_factor_table_index(assignment: &[usize], domain_size: usize) -> usize {
+    let mut idx = 0;
+    let mut stride = 1;
+    // NB row-major: last index corresponds to stride 1.
+    for &a in assignment.iter().rev() {
+        idx += a * stride;
+        stride *= domain_size;
+    }
+    idx
+}
+
+fn compute_factor_message(
+    factor: &Factor,
+    target_var_idx: usize, // Index in factor.variables
+    domain_size: usize,
+    incoming_messages: &[Vec<f64>]
+) -> Vec<f64> {
+    let mut messages = vec![0.0; domain_size];
+    
+    // NB we need the message component for the target variable fixed to each in its domain.
+    for target_state in 0..domain_size {
+        // NB we sum over all configurations of the other variables in this factor, multiplying
+        //    the factor table value for that configuration with the incoming messages for those
+        //    variables at that configuration.  In log space, this is a sum of the factor table
+        //    value and the incoming messages, followed by a logsumexp over all configurations.
+        let mut current_assignment = vec![0; factor.variables.len()];
+
+        // NB analagous to the parent logic in pruning.
+        current_assignment[target_var_idx] = target_state;
+
+        // NB construct the message for target_var in target_state
+        let mut log_terms = Vec::new();
+
+        // NB sum over all other variables' configurations
+        loop {
+            // NB compute table index (row-major) for this factor at the current assignment.
+            let idx = get_factor_table_index(&current_assignment, domain_size);
+
+            let mut term = factor.table[idx];
+            for (j, msg) in incoming_messages.iter().enumerate() {
+                if j != target_var_idx {
+                    term += msg[current_assignment[j]]; 
+                }
+            }
+            log_terms.push(term);
+
+            // NB exhausted all configurations of other variables.
+            if !next_assignment(&mut current_assignment, domain_size, target_var_idx) {
+                break;
+            }
+        }
+
+        // NB to be normalized later.
+        messages[target_state] = logsumexp(&log_terms);
+    }
+    messages
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::rc::Rc;
-    use rand::seq::SliceRandom;
-    use std::collections::HashMap;
+
+    #[test]
+    fn test_rng() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let nums: Vec<i32> = (1..100).collect();
+    
+        let secret = nums.choose(&mut rng);
+
+        assert!(secret == Some(&14));
+    }
+
+    #[test]
+    fn test_normalize_log_msg() {
+        let mut msg = vec![1.0, 2.0, 3.0];
+        normalize_log_msg(&mut msg);
+        let lse = (1.0f64.exp() + 2.0f64.exp() + 3.0f64.exp()).ln();
+
+        assert!((msg[0] - (1.0 - lse)).abs() < 1e-6);
+        assert!((msg[1] - (2.0 - lse)).abs() < 1e-6);
+        assert!((msg[2] - (3.0 - lse)).abs() < 1e-6);
+
+    }
+
+    #[test]
+    fn test_factor_table_indexing() {
+        let domain_size = 3;
+        
+        // assignment [0, 0] -> 0
+        assert_eq!(get_factor_table_index(&[0, 0], domain_size), 0);
+        // assignment [0, 1] -> 0*3 + 1 = 1
+        assert_eq!(get_factor_table_index(&[0, 1], domain_size), 1);
+        // assignment [0, 2] -> 2
+        assert_eq!(get_factor_table_index(&[0, 2], domain_size), 2);
+        // assignment [1, 0] -> 1*3 + 0 = 3
+        assert_eq!(get_factor_table_index(&[1, 0], domain_size), 3);
+        // assignment [2, 2] -> 2*3 + 2 = 8
+        assert_eq!(get_factor_table_index(&[2, 2], domain_size), 8);
+
+        // 3 vars [0, 1, 2], domain 3
+        // 0 * 9 + 1 * 3 + 2 * 1 = 3 + 2 = 5
+        assert_eq!(get_factor_table_index(&[0, 1, 2], domain_size), 5);
+    }
+
+    #[test]
+    fn test_next_assignment() {
+        let mut assignment = vec![0, 0, 0];
+        let domain_size = 2;
+        let skip = 1;
+
+        let mut results = Vec::new();
+        loop {
+            results.push(assignment.clone());
+            if !next_assignment(&mut assignment, domain_size, skip) {
+                break;
+            }
+        }
+
+        assert_eq!(results, vec![
+            vec![0, 0, 0],
+            vec![1, 0, 0],
+            vec![0, 0, 1],
+            vec![1, 0, 1],
+        ]);
+    }
 
     #[test]
     fn test_chain_marginals() {
+        // NB exact inference is 2^N=32 configs for N=5.
         let n_states: usize = 2;
         let chain_len: usize = 5;
 
-        let trans = [0.6, 0.4, 0.3, 0.7];
+        // NB each state can emit two emission characters [0 or 1].
         let emit = [0.8, 0.2, 0.1, 0.9];
+        let trans = [0.6, 0.4, 0.3, 0.7];
         let prior = [0.6, 0.4];
+        
+        // NB observed 2-state sequence.        
         let obs = [0, 1, 0, 1, 0];
 
         // 1. Standard Forward-Backward Calculation for Validation
         let mut alpha = vec![vec![0.0; n_states]; chain_len];
-        // Init alpha
+        // NB initial alpha is prior * emission for first obs; normalized over states.
         for i in 0..n_states { alpha[0][i] = prior[i] * emit[i * 2 + obs[0]]; }
+
         let s0: f64 = alpha[0].iter().sum();
         for v in &mut alpha[0] { *v /= s0; }
 
+        // NB march up the chain.
         for t in 1..chain_len {
             for j in 0..n_states {
                 let mut p = 0.0;
@@ -278,13 +391,12 @@ mod tests {
             for v in &mut beta[t] { *v /= sb; }
         }
         
-        // 2. Build Factor Graph
+        // NB Construct the factor graph.
         let mut fg = FactorGraph::new(chain_len, n_states);
         
-        // Prior
         fg.add_factor(vec![0], prior.iter().map(|x| x.ln()).collect(), FactorType::Prior);
 
-        // Transitions (Shared)
+        // NB Transition factors (shared memory)
         let trans_log: Vec<f64> = trans.iter().map(|x| x.ln()).collect();
         let trans_log_rc = Rc::new(trans_log);
         for t in 0..chain_len-1 {
@@ -299,18 +411,16 @@ mod tests {
             }
             fg.add_factor(vec![t], emit_log, FactorType::Emission);
         }
-    
-        // 3. Run BP
-        println!("Running Belief Propagation on Chain (L={})...", chain_len);
-        fg.run_belief_propagation(50, 1e-6);
+
+        println!("Running Belief Propagation on {}-chain", chain_len);
+        fg.run_belief_propagation(50, 1e-6, 0.0);
         let bp_marginals_log = fg.calculate_marginals();
         
-        // 4. Compare
         println!("Comparing Marginals (Exact vs BP):");
         assert_eq!(bp_marginals_log.len(), chain_len);
         
         for t in 0..chain_len {
-             // Convert exact components to marginals
+             // NB marginals from Forward-Backward.
              let mut mj = vec![0.0; n_states];
              let mut mj_sum = 0.0;
              for i in 0..n_states {
@@ -346,6 +456,8 @@ mod tests {
         
         let num_vars = 7;
         let n_states = 2;
+
+        // NB root is 0, etc.
         let edges = [(0, 1), (0, 2),
             (1, 3), (1, 4),
             (2, 5), (2, 6)];
@@ -421,7 +533,7 @@ mod tests {
         }
 
         println!("Running Belief Propagation on Tree (Nodes={})...", num_vars);
-        fg.run_belief_propagation(50, 1e-6);
+        fg.run_belief_propagation(50, 1e-6, 0.0);
         let bp_marginals_log = fg.calculate_marginals();
 
         // 3. Compare
@@ -444,7 +556,8 @@ mod tests {
 
     #[test]
     fn test_hmrf_marginals() {
-        // Construct a small 3x3 Grid (Loopy Graph)
+        // 3x3 loopy belief propagation.
+        // 
         // 0 -- 1 -- 2
         // |    |    |
         // 3 -- 4 -- 5
@@ -543,8 +656,9 @@ mod tests {
         }
 
         println!("Running Loopy Belief Propagation on 3x3 Grid...");
+        
         // Loopy BP is approximate and iterative.
-        fg.run_belief_propagation(100, 1e-5);
+        fg.run_belief_propagation(100, 1e-5, 0.0);
         let bp_marginals_log = fg.calculate_marginals();
 
         // 3. Compare (Expect deviations due to loops, but should be correlated)
