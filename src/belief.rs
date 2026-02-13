@@ -109,15 +109,13 @@ impl FactorGraph {
         }
 
         // NB set a reasonable upper bound on iterations to prevent infinite loops in pathological cases.
-        let limit = 100_000_000.min(max_iters * self.factors.len().max(1) * 10).max(1000);
         let mut iters = 0;
-
         let mut success = 1;
 
         // NB pop one Var->Factor or Factor->Var message update to process.
         while let Some(item) = queue.pop_front() {
             iters += 1;
-            if iters > limit { 
+            if iters > max_iters { 
                 success = 0;   
                 break; 
             }
@@ -188,9 +186,9 @@ impl FactorGraph {
 
                     let mut new_msg = vec![0.0; self.domain_size];
 
-                    // NB annealing dropout: linear decay from max_dropout_rate to 0 over limit iterations.
-                    //    rate = max_dropout * (1 - iters/limit)
-                    let current_dropout = max_dropout_rate * (1.0 - (iters as f64 / limit as f64)).max(0.0);
+                    // NB annealing dropout: linear decay from max_dropout_rate to 0 over max_iters iterations.
+                    //    rate = max_dropout * (1 - iters/max_iters)
+                    let current_dropout = max_dropout_rate * (1.0 - (iters as f64 / max_iters as f64)).max(0.0);
 
                     // NB Apply dropout if requested: pass uniform message with probability p.
                     if self.rng.random::<f64>() >= current_dropout {
@@ -418,7 +416,7 @@ mod tests {
         }
 
         println!("Running Belief Propagation on {}-chain with dropout rate {}", chain_len, dropout_rate);
-        let bp_marginals_log =fg.run_belief_propagation(50, 1e-6, dropout_rate, alpha);
+        let bp_marginals_log =fg.run_belief_propagation(500, 1e-6, dropout_rate, alpha);
         
         assert_eq!(bp_marginals_log.len(), chain_len);
         
@@ -464,7 +462,7 @@ mod tests {
         }
 
         println!("Running Belief Propagation on Tree (Nodes={})...", num_vars);
-        let bp_marginals_log = fg.run_belief_propagation(50, 1e-6, max_dropout_rate, alpha);
+        let bp_marginals_log = fg.run_belief_propagation(500, 1e-6, max_dropout_rate, alpha);
 
         println!("Comparing Marginals (Exact vs BP):");
         for i in 0..num_vars {
@@ -519,7 +517,7 @@ mod tests {
         println!("Running Loopy Belief Propagation on {}x{} grid...", width, height);
         
         // Loopy BP is approximate and iterative.
-        let bp_marginals_log = fg.run_belief_propagation(100, 1e-5, max_dropout_rate, alpha);
+        let bp_marginals_log = fg.run_belief_propagation(1_000_000, 1e-5, max_dropout_rate, alpha);
 
         // 3. Compare (Expect deviations due to loops, but should be correlated)
         let mut max_diff = 0.0;
@@ -578,7 +576,7 @@ mod tests {
 
         println!("Running Loopy Belief Propagation on {}x{} grid...", width, height);
         
-        let bp_marginals_log = fg.run_belief_propagation(100, 1e-5, max_dropout_rate, alpha);
+        let bp_marginals_log = fg.run_belief_propagation(100_000_000, 1e-5, max_dropout_rate, alpha);
     }
 
 }
