@@ -1,4 +1,5 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BinaryHeap, HashMap};
+use std::cmp::Ordering;
 use std::rc::Rc;
 use rand::prelude::*;
 use rand::rngs::StdRng;
@@ -33,10 +34,37 @@ pub struct FactorGraph {
     pub rng: StdRng,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum WorkItem {
     VarToFactor { var_id: usize, factor_id: usize },
     FactorToVar { factor_id: usize, var_id: usize },
+}
+
+#[derive(Clone, Copy)]
+struct PriorityWorkItem {
+    item: WorkItem,
+    priority: f64,
+}
+
+impl PartialEq for PriorityWorkItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.priority == other.priority
+    }
+}
+
+impl Eq for PriorityWorkItem {}
+
+impl Ord for PriorityWorkItem {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // NB Max-heap: compare priorities directly. Handle NaNs by treating them as equal (should not occur).
+        self.priority.partial_cmp(&other.priority).unwrap_or(Ordering::Equal)
+    }
+}
+
+impl PartialOrd for PriorityWorkItem {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl FactorGraph {
@@ -96,7 +124,7 @@ impl FactorGraph {
     }
 
     pub fn run_belief_propagation(&mut self, max_iters: usize, tolerance: f64, max_dropout_rate: f64, alpha: f64) -> Vec<Vec<f64>>{
-        let mut queue = VecDeque::new();
+        let mut queue = BinaryHeap::new();
 
         for factor in &self.factors {
             for &var in &factor.variables {
@@ -108,7 +136,11 @@ impl FactorGraph {
                 //    variables receive information from these sources.
                 match factor.factor_type {
                     FactorType::Prior | FactorType::Emission => {
-                        queue.push_back(WorkItem::FactorToVar { factor_id: factor.id, var_id: var });
+                        // NB Initial tasks get infinite/high priority to ensure they run.
+                        queue.push(PriorityWorkItem {
+                            item: WorkItem::FactorToVar { factor_id: factor.id, var_id: var },
+                            priority: f64::INFINITY
+                        });
                     },
                     _ => {} // Transition/Custom factors wait for input.
                 }
@@ -122,13 +154,13 @@ impl FactorGraph {
         let mut success = 1;
 
         // NB pop one Var->Factor or Factor->Var message update to process.
-        while let Some(item) = queue.pop_front() {
+        while let Some(p_item) = queue.pop() {
             if iters > max_iters { 
                 success = 0;   
                 break; 
             }
 
-            match item {
+            match p_item.item {
                 WorkItem::VarToFactor { var_id, factor_id } => {
                     // NB message of var j to factor a is the product (sum in log-space) of all incoming messages 
                     //    to var j except from a.
@@ -188,7 +220,10 @@ impl FactorGraph {
                         for &n_var in &factor.variables {
                             if n_var != var_id {
                                 // NB support for target factor a over domain has updated, schedule all neighboring variables.
-                                queue.push_back(WorkItem::FactorToVar { factor_id, var_id: n_var });
+                                queue.push(PriorityWorkItem {
+                                    item: WorkItem::FactorToVar { factor_id, var_id: n_var },
+                                    priority: diff // Schedule with priority equal to magnitude of change
+                                });
                             }
                         }
                     }
@@ -238,7 +273,10 @@ impl FactorGraph {
                         if let Some(neighbors) = self.var_adj.get(&var_id) {
                             for &n_fid in neighbors {
                                 if n_fid != factor_id {
-                                    queue.push_back(WorkItem::VarToFactor { var_id, factor_id: n_fid });
+                                    queue.push(PriorityWorkItem { 
+                                        item: WorkItem::VarToFactor { var_id, factor_id: n_fid },
+                                        priority: diff
+                                    });
                                 }
                             }
                         }
