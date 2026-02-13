@@ -22,10 +22,8 @@ pub struct FactorGraph {
     pub var_adj: HashMap<usize, Vec<usize>>,
     pub domain_size: usize,
     pub num_vars: usize,
-    // (var_id, factor_id) -> message
-    pub var_to_factor: HashMap<(usize, usize), Vec<f64>>,
-    // (factor_id, var_id) -> message
-    pub factor_to_var: HashMap<(usize, usize), Vec<f64>>,
+    pub var_to_factor: HashMap<(usize, usize), Vec<f64>>, // (var_id, factor_id) -> message for s in domain.
+    pub factor_to_var: HashMap<(usize, usize), Vec<f64>>, // (factor_id, var_id) -> message for s in domain.
 }
 
 #[derive(Clone, Copy)]
@@ -52,29 +50,34 @@ impl FactorGraph {
 
     pub fn add_shared_factor(&mut self, variables: Vec<usize>, table: Rc<Vec<f64>>, factor_type: FactorType) {
         let id = self.factors.len();
+
+        // NB for each variable in this factor, add the factor to its adjacency.
         for &v in &variables {
             self.var_adj.entry(v).or_default().push(id);
         }
+
+        // NB reference count the factor table for memory efficiency when shared. 
         self.factors.push(Factor { id, variables, table, factor_type });
     }
 
     pub fn run_belief_propagation(&mut self, max_iters: usize, tolerance: f64) {
         let mut queue = VecDeque::new();
 
-        // Initialize messages and populate queue
         for factor in &self.factors {
             for &var in &factor.variables {
                 self.var_to_factor.entry((var, factor.id)).or_insert_with(|| vec![0.0; self.domain_size]);
                 self.factor_to_var.entry((factor.id, var)).or_insert_with(|| vec![0.0; self.domain_size]);
                 
-                queue.push_back(WorkItem::VarToFactor { var_id: var, factor_id: factor.id });
+                // queue.push_back(WorkItem::VarToFactor { var_id: var, factor_id: factor.id });
                 queue.push_back(WorkItem::FactorToVar { factor_id: factor.id, var_id: var });
             }
         }
 
-        let mut iters = 0;
+        // NB set a reasonable upper bound on iterations to prevent infinite loops in pathological cases.
         let limit = 200_000.min(max_iters * self.factors.len().max(1) * 10).max(1000);
+        let mut iters = 0;
 
+        // NB pop one Var->Factor or Factor->Var message update to process.
         while let Some(item) = queue.pop_front() {
             iters += 1;
             if iters > limit { break; }
@@ -88,7 +91,6 @@ impl FactorGraph {
                              let mut sum = 0.0;
                              for &n_fid in neighbors {
                                  if n_fid != factor_id {
-                                     // Only read existing messages
                                      if let Some(msg) = self.factor_to_var.get(&(n_fid, var_id)) {
                                          sum += msg[i];
                                      }
@@ -145,6 +147,7 @@ impl FactorGraph {
         }
     }
 
+    // NB calculate the marginals for each variable as incoming Factor->Var messages produce & and normalize. 
     pub fn calculate_marginals(&self) -> Vec<Vec<f64>> {
         let mut marginals = Vec::with_capacity(self.num_vars);
         for v in 0..self.num_vars {
@@ -215,6 +218,8 @@ fn compute_factor_message(
 }
 
 fn next_assignment(assignment: &mut [usize], domain_size: usize, skip: usize) -> bool {
+    // NB increment the assignment vector with each spin taking 0..domain_size,
+    //    skipping a target variable.
     for (j, val) in assignment.iter_mut().enumerate() {
         if j == skip { continue; }
         *val += 1;
@@ -451,6 +456,7 @@ mod tests {
         let num_vars = width * height;
         let n_states = 2; // Binary grid
 
+        // NB this will be the node adjacency?
         let mut edges = Vec::new();
         // Horizontal edges
         for r in 0..height {
@@ -469,15 +475,15 @@ mod tests {
             }
         }
 
-        // Deterministic emissions (Unary)
+        // Deterministic emissions (Unary); one per site.
         let mut emissions = Vec::with_capacity(num_vars);
         for i in 0..num_vars {
             let p = 0.6 + ((i as f64 * 0.1) % 0.3); // Biased towards state 0
             emissions.push(vec![p, 1.0 - p]);
         }
 
-        // Deterministic pairwise potentials (Potts/Ising model-like)
-        // Strong coupling to make loops relevant
+        // Deterministic pairwise potentials (Potts/Ising model-like); one per edge.
+        // Strong coupling to make loops relevant; i.e. p if same, 1-p if different.
         let coupling_prob: f64 = 0.8; 
         let pairwise_table = [coupling_prob, 1.0 - coupling_prob, 1.0 - coupling_prob, coupling_prob];
 
@@ -528,6 +534,8 @@ mod tests {
         }
 
         let pw_log: Vec<f64> = pairwise_table.iter().map(|p| p.ln()).collect();
+
+        // NB reference count the pairwise table since it's shared across all edges for memory efficiency.
         let pw_log_rc = Rc::new(pw_log);
 
         for &(u, v) in &edges {

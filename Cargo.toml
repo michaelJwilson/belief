@@ -66,6 +66,10 @@ lto = true
 overflow-checks = false
 # panic = "abort"
 
+[profile.bench]
+inherits = "release"
+debug = true
+
 # NB "target-cpu=arm64"; "target-cpu=native".
 [build]
 rustflags = ["-C", "target-cpu=native -Awarnings --cfg debug_statements"]
