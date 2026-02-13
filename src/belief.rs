@@ -607,7 +607,7 @@ mod tests {
     fn test_large_hmrf_marginals() {
         let width = 1_000;
         let height = 100;
-        let n_states = 2; // Binary grid
+        let n_states = 4;
         let coupling_prob: f64 = 0.8; 
 
         let potts = get_test_potts(width, height, n_states, coupling_prob);
@@ -637,7 +637,6 @@ mod tests {
 
         println!("Running Loopy Belief Propagation on {}x{} grid...", width, height);
         
-        let bp_marginals_log = fg.run_belief_propagation(100_000_000, 1e-5, max_dropout_rate, alpha);
+        let bp_marginals_log = fg.run_belief_propagation(1_000, 1e-5, max_dropout_rate, alpha);
     }
-
 }

@@ -15,6 +15,12 @@ impl Potts {
         coupling_prob: f64, 
         emissions: Vec<Vec<f64>>
     ) -> Self {
+        assert!(n_states >= 2, "n_states must be >= 2");
+        assert_eq!(emissions.len(), width * height, "Emissions length must match number of variables");
+        for e in &emissions {
+            assert_eq!(e.len(), n_states, "Each emission vector must have size n_states");
+        }
+
         let mut edges = Vec::new();
         
         // NB deterministic pairwise potentials (Potts/Ising model-like); one per edge.
@@ -98,13 +104,20 @@ pub fn get_test_potts(
 ) -> Potts {
     let num_vars = width * height;
 
-    // NB deterministic emissions probability (Unary); one per site for two states.
+    // NB deterministic emissions probability (Unary); one per site for n states.
     let mut emissions = Vec::with_capacity(num_vars);
     for i in 0..num_vars {
         let p = 0.6 + ((i as f64 * 0.1) % 0.3); // Biased towards state 0
 
-        // NB for the variable obs. character, prob. of state 0 is p, state 1 is 1-p.
-        emissions.push(vec![p, 1.0 - p]);
+        let mut site_emissions = vec![0.0; n_states];
+        site_emissions[0] = p;
+        if n_states > 1 {
+            let remaining_prob = (1.0 - p) / (n_states as f64 - 1.0);
+            for s in 1..n_states {
+                site_emissions[s] = remaining_prob;
+            }
+        }
+        emissions.push(site_emissions);
     }
     Potts::new(width, height, n_states, coupling_prob, emissions)
 }
@@ -130,6 +143,27 @@ mod tests {
         for i in 0..num_vars {
             let sum: f64 = marginals[i].iter().sum();
             assert!((sum - 1.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_potts_exact_marginals_3_states() {
+        let width = 2;
+        let height = 2;
+        let n_states = 3; 
+        let coupling_prob: f64 = 0.8; 
+        
+        let potts = get_test_potts(width, height, n_states, coupling_prob);
+        let num_vars = potts.num_vars();
+
+        let marginals = potts.exact_marginals();
+        
+        assert_eq!(marginals.len(), num_vars);
+
+        for i in 0..num_vars {
+            let sum: f64 = marginals[i].iter().sum();
+            assert!((sum - 1.0).abs() < 1e-6);
+            assert_eq!(marginals[i].len(), 3);
         }
     }
 }
