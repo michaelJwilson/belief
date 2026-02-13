@@ -4,7 +4,7 @@ use rand::prelude::*;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use crate::utils::logsumexp;
-use crate::hmm::HMM;
+use crate::hmm::{HMM, get_test_hmm};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VariableType { Latent, Emission }
@@ -348,24 +348,16 @@ mod tests {
     #[test]
     fn test_chain_marginals() {
         // NB exact inference is 2^N=32 configs for N=5.
-        let n_states: usize = 2;
-        let chain_len: usize = 5;
+        let n_states: usize = 3;
+        let chain_len: usize = 10;
 
-        // NB each state can emit two emission characters [0 or 1].
-        let emit = vec![0.8, 0.2, 0.1, 0.9];
-        let trans = vec![0.6, 0.4, 0.3, 0.7];
-        let prior = vec![0.6, 0.4];
-        
-        // NB observed 2-state sequence.        
-        let obs = vec![0, 1, 0, 1, 0];
-
-        // 1. Standard Forward-Backward Calculation for Validation using HMM struct
-        let hmm = HMM::new(n_states, trans.clone(), emit.clone(), prior.clone());
+        let (hmm, obs) = get_test_hmm(n_states, chain_len);
         let exact_marginals = hmm.marginals(&obs);
         
         // NB Construct the factor graph.
         let mut fg = FactorGraph::new(chain_len, n_states);
-        
+        let (prior, trans, emit) = (hmm.prior.clone(), hmm.trans.clone(), hmm.emit.clone());
+
         fg.add_factor(vec![0], prior.iter().map(|x| x.ln()).collect(), FactorType::Prior);
 
         // NB Transition factors (shared memory)

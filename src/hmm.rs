@@ -87,6 +87,51 @@ impl HMM {
     }
 }
 
+pub fn get_test_hmm(n_states: usize, chain_len: usize) -> (HMM, Vec<usize>) {
+    // Deterministic prior: favoring lower indices slightly
+    let mut prior = vec![0.0; n_states];
+    let mut sum = 0.0;
+    for i in 0..n_states {
+        prior[i] = 1.0 / (1.0 + i as f64);
+        sum += prior[i];
+    }
+    for v in &mut prior { *v /= sum; }
+
+    // Deterministic transitions: favoring self-loops
+    let mut trans = vec![0.0; n_states * n_states];
+    for i in 0..n_states {
+        let mut row_sum = 0.0;
+        for j in 0..n_states {
+            let val = if i == j { 0.5 } else { 0.5 / (n_states as f64 - 1.0).max(1.0) };
+            trans[i * n_states + j] = val;
+            row_sum += val;
+        }
+        // Normalize just in case of float drifts, though logic above sums to ~1.0
+        for j in 0..n_states { trans[i * n_states + j] /= row_sum; }
+    }
+
+    // Deterministic emissions: n_states x n_states (assuming obs size == n_states for simplicity, or 2)
+    // Let's assume observation domain size is 2 for simplicity as per previous tests, 
+    // or we can make it variable. The previous code assumed emission size 2 per state.
+    // Let's generalize to emission vector size matching n_states * 2 (obs domain 2).
+    let obs_domain = 2;
+    let mut emit = vec![0.0; n_states * obs_domain];
+    for i in 0..n_states {
+        // State i emits 0 with prob p, 1 with prob 1-p
+        let p = 0.1 + 0.8 * ((i % 2) as f64); // Alternating bias
+        emit[i * obs_domain + 0] = p;
+        emit[i * obs_domain + 1] = 1.0 - p;
+    }
+
+    // Deterministic observations
+    let mut obs = Vec::with_capacity(chain_len);
+    for t in 0..chain_len {
+        obs.push(t % obs_domain);
+    }
+
+    (HMM::new(n_states, trans, emit, prior), obs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,7 +141,7 @@ mod tests {
         // NB exact inference is 2^N=32 configs for N=5.
         let n_states: usize = 2;
         let chain_len: usize = 5;
-
+        /*
         // NB observed 2-state sequence.        
         let obs = [0, 1, 0, 1, 0];
 
@@ -106,10 +151,12 @@ mod tests {
             vec![0.8, 0.2, 0.1, 0.9],
             vec![0.6, 0.4],     
         );
-
+        */
+        let (hmm, obs) = get_test_hmm(n_states, chain_len);
         let marginals = hmm.marginals(&obs);
 
         assert_eq!(marginals.len(), chain_len);
+
         for t in 0..chain_len {
             let sum: f64 = marginals[t].iter().sum();
             assert!((sum - 1.0).abs() < 1e-6);
