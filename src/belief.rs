@@ -71,7 +71,29 @@ impl FactorGraph {
         self.factors.push(Factor { id, variables, table, factor_type });
     }
 
-    pub fn run_belief_propagation(&mut self, max_iters: usize, tolerance: f64, dropout_rate: f64) {
+    // NB calculate the marginals for each variable as incoming Factor->Var messages produce & and normalize. 
+    pub fn calculate_marginals(&self) -> Vec<Vec<f64>> {
+        let mut marginals = Vec::with_capacity(self.num_vars);
+        for v in 0..self.num_vars {
+            let mut log_prob = vec![0.0; self.domain_size];
+            // NB marginal belief at a variable node v is the sum of all ln prob. messages from adjacent factors to v.  
+            //    See eqn. (14.16) in Mezard.
+            if let Some(n_fids) = self.var_adj.get(&v) {
+                for &fid in n_fids {
+                    if let Some(msg) = self.factor_to_var.get(&(fid, v)) {
+                        for i in 0..self.domain_size {
+                            log_prob[i] += msg[i];
+                        }
+                    }
+                }
+            }
+            normalize_log_msg(&mut log_prob);
+            marginals.push(log_prob);
+        }
+        marginals
+    }
+
+    pub fn run_belief_propagation(&mut self, max_iters: usize, tolerance: f64, dropout_rate: f64) -> Vec<Vec<f64>>{
         let mut queue = VecDeque::new();
 
         for factor in &self.factors {
@@ -176,28 +198,8 @@ impl FactorGraph {
                 }
             }
         }
-    }
 
-    // NB calculate the marginals for each variable as incoming Factor->Var messages produce & and normalize. 
-    pub fn calculate_marginals(&self) -> Vec<Vec<f64>> {
-        let mut marginals = Vec::with_capacity(self.num_vars);
-        for v in 0..self.num_vars {
-            let mut log_prob = vec![0.0; self.domain_size];
-            // NB marginal belief at a variable node v is the sum of all ln prob. messages from adjacent factors to v.  
-            //    See eqn. (14.16) in Mezard.
-            if let Some(n_fids) = self.var_adj.get(&v) {
-                for &fid in n_fids {
-                    if let Some(msg) = self.factor_to_var.get(&(fid, v)) {
-                        for i in 0..self.domain_size {
-                            log_prob[i] += msg[i];
-                        }
-                    }
-                }
-            }
-            normalize_log_msg(&mut log_prob);
-            marginals.push(log_prob);
-        }
-        marginals
+        self.calculate_marginals()
     }
 }
 
@@ -352,12 +354,14 @@ mod tests {
         let chain_len: usize = 10;
 
         let (hmm, obs) = get_test_hmm(n_states, chain_len);
+        let (prior, trans, emit) = (hmm.prior.clone(), hmm.trans.clone(), hmm.emit.clone());
+
         let exact_marginals = hmm.marginals(&obs);
         
         // NB Construct the factor graph.
         let mut fg = FactorGraph::new(chain_len, n_states);
-        let (prior, trans, emit) = (hmm.prior.clone(), hmm.trans.clone(), hmm.emit.clone());
 
+        // NB prior factor on the first variable in the chain.
         fg.add_factor(vec![0], prior.iter().map(|x| x.ln()).collect(), FactorType::Prior);
 
         // NB Transition factors (shared memory)
@@ -377,10 +381,8 @@ mod tests {
         }
 
         println!("Running Belief Propagation on {}-chain", chain_len);
-        fg.run_belief_propagation(50, 1e-6, 0.0);
-        let bp_marginals_log = fg.calculate_marginals();
+        let bp_marginals_log =fg.run_belief_propagation(50, 1e-6, 0.0);
         
-        println!("Comparing Marginals (Exact vs BP):");
         assert_eq!(bp_marginals_log.len(), chain_len);
         
         for t in 0..chain_len {
@@ -491,8 +493,7 @@ mod tests {
         }
 
         println!("Running Belief Propagation on Tree (Nodes={})...", num_vars);
-        fg.run_belief_propagation(50, 1e-6, 0.0);
-        let bp_marginals_log = fg.calculate_marginals();
+        let bp_marginals_log = fg.run_belief_propagation(50, 1e-6, 0.0);
 
         // 3. Compare
         println!("Comparing Marginals (Exact vs BP):");
