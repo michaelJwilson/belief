@@ -130,26 +130,39 @@ impl FactorGraph {
 
             match item {
                 WorkItem::VarToFactor { var_id, factor_id } => {
-                    // NB message of var j to factor a is the product of all incoming messages to var j except from a.
-                    //    In log space, this is a sum.  See eqn. (14.14) in Mezard.
-                    let mut incoming = vec![0.0; self.domain_size];
+                    // NB message of var j to factor a is the product (sum in log-space) of all incoming messages 
+                    //    to var j except from a.
+                    //    Optimization: Compute sum of ALL incoming messages first, then subtract the specific one.
+                    
+                    let mut total_sum = vec![0.0; self.domain_size];
+                    let mut has_inputs = false;
 
-                    // NB 
                     if let Some(neighbors) = self.var_adj.get(&var_id) {
-                         for i in 0..self.domain_size {
-                             let mut sum = 0.0;
-
-                             // NB all neighbouring factors except the target factor, a.
-                             for &n_fid in neighbors {
-                                 if n_fid != factor_id {
-                                     if let Some(msg) = self.factor_to_var.get(&(n_fid, var_id)) {
-                                         sum += msg[i];
-                                     }
+                         for &n_fid in neighbors {
+                             if let Some(msg) = self.factor_to_var.get(&(n_fid, var_id)) {
+                                 for i in 0..self.domain_size {
+                                     total_sum[i] += msg[i];
                                  }
+                                 has_inputs = true;
                              }
-                             incoming[i] = sum;
+                         }
+                    }
+
+                    let mut incoming = vec![0.0; self.domain_size];
+                    
+                    if has_inputs {
+                        // Subtract the message from the target factor 'factor_id' to get the extrinsic message
+                        if let Some(msg_from_target) = self.factor_to_var.get(&(factor_id, var_id)) {
+                             for i in 0..self.domain_size {
+                                 incoming[i] = total_sum[i] - msg_from_target[i];
+                             }
+                        } else {
+                            // If target factor hasn't sent a message yet (rare if initialized properly), 
+                            // the total sum is the correct message.
+                            incoming = total_sum;
                         }
                     }
+
                     normalize_log_msg(&mut incoming);
 
                     // NB get the old message and check for update magnitude.
