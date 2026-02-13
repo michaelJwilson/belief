@@ -226,7 +226,7 @@ impl FactorGraph {
             }
         }
 
-        println!("BP terminated with success={} in {} iterations.", success, iters);
+        println!("BP terminated with success={} in {} iterations ( {} [|variables|] iterations).", success, iters, iters / self.factors.len().max(1));
 
         self.calculate_marginals()
     }
