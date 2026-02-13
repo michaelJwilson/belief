@@ -497,7 +497,7 @@ mod tests {
 
     #[test]
     fn test_large_hmrf_marginals() {
-        let num_workers = 4;
+        let num_workers = 8;
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(num_workers)
             .build()
