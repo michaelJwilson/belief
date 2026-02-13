@@ -1,24 +1,11 @@
-use std::fs::File;
-use std::io::{BufWriter, Write};
-use std::collections::{HashMap, VecDeque, HashSet};
-use rand::Rng;
-use rand::prelude::*;
-
+use std::collections::{HashMap, VecDeque};
 use crate::utils::logsumexp;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VariableType {
-    Latent,
-    Emission,
-}
+pub enum VariableType { Latent, Emission }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FactorType {
-    Emission,
-    Transition,
-    Prior,
-    Custom,
-}
+pub enum FactorType { Emission, Transition, Prior, Custom }
 
 #[derive(Debug, Clone)]
 pub struct Factor {
@@ -28,20 +15,22 @@ pub struct Factor {
     pub table: Vec<f64>,
 }
 
-/// NB Forney factor graph with variables and factors connected by edges.
+/// Forney factor graph with variables and factors connected by edges.
 pub struct FactorGraph {
     pub factors: Vec<Factor>,
     pub var_adj: HashMap<usize, Vec<usize>>,
     pub domain_size: usize,
     pub num_vars: usize,
+    // (var_id, factor_id) -> message
     pub var_to_factor: HashMap<(usize, usize), Vec<f64>>,
+    // (factor_id, var_id) -> message
     pub factor_to_var: HashMap<(usize, usize), Vec<f64>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EdgeDirection {
-    VarToFactor,
-    FactorToVar,
+#[derive(Clone, Copy)]
+enum WorkItem {
+    VarToFactor { var_id: usize, factor_id: usize },
+    FactorToVar { factor_id: usize, var_id: usize },
 }
 
 impl FactorGraph {
@@ -61,113 +50,89 @@ impl FactorGraph {
         for &v in &variables {
             self.var_adj.entry(v).or_default().push(id);
         }
-        self.factors.push(Factor {
-            id,
-            variables,
-            table,
-            factor_type,
-        });
+        self.factors.push(Factor { id, variables, table, factor_type });
     }
 
     pub fn run_belief_propagation(&mut self, max_iters: usize, tolerance: f64) {
         let mut queue = VecDeque::new();
 
-        // Initialize messages to uniform (0.0 in log domain)
-        for fac in &self.factors {
-            for &v in &fac.variables {
-                // Initialize default keys
-                self.var_to_factor.entry((v, fac.id)).or_insert_with(|| vec![0.0; self.domain_size]);
-                self.factor_to_var.entry((fac.id, v)).or_insert_with(|| vec![0.0; self.domain_size]);
+        // Initialize messages and populate queue
+        for factor in &self.factors {
+            for &var in &factor.variables {
+                self.var_to_factor.entry((var, factor.id)).or_insert_with(|| vec![0.0; self.domain_size]);
+                self.factor_to_var.entry((factor.id, var)).or_insert_with(|| vec![0.0; self.domain_size]);
                 
-                // Add initial tasks to queue
-                queue.push_back((EdgeDirection::VarToFactor, v, fac.id));
-                queue.push_back((EdgeDirection::FactorToVar, fac.id, v));
+                queue.push_back(WorkItem::VarToFactor { var_id: var, factor_id: factor.id });
+                queue.push_back(WorkItem::FactorToVar { factor_id: factor.id, var_id: var });
             }
         }
 
         let mut iters = 0;
-        let factor_count = self.factors.len().max(1);
+        let limit = 200_000.min(max_iters * self.factors.len().max(1) * 10).max(1000);
 
-        while let Some((dir, src, dst)) = queue.pop_front() {
+        while let Some(item) = queue.pop_front() {
             iters += 1;
+            if iters > limit { break; }
 
-            // Break if potentially infinite loop (loopy graph) or max iters exceeded
-            if iters > max_iters * factor_count * 10 && iters > 200_000 { break; }
-
-            match dir {
-                EdgeDirection::VarToFactor => {
-                    let var_id = src;
-                    let factor_id = dst;
-                    
-                    // Sum incoming messages from all *other* factors
+            match item {
+                WorkItem::VarToFactor { var_id, factor_id } => {
+                    // Update u_{x -> f}(x) = Sum_{h in N(x)\f} u_{h -> x}(x)
                     let mut incoming = vec![0.0; self.domain_size];
                     if let Some(neighbors) = self.var_adj.get(&var_id) {
                          for i in 0..self.domain_size {
                              let mut sum = 0.0;
                              for &n_fid in neighbors {
                                  if n_fid != factor_id {
-                                     sum += self.factor_to_var[&(n_fid, var_id)][i];
+                                     // Only read existing messages
+                                     if let Some(msg) = self.factor_to_var.get(&(n_fid, var_id)) {
+                                         sum += msg[i];
+                                     }
                                  }
                              }
                              incoming[i] = sum;
                         }
                     }
+                    normalize_log_msg(&mut incoming);
 
-                    // Normalize to control numerical stability in log domain
-                    let lse = logsumexp(&incoming); 
-                    for x in &mut incoming { *x -= lse; }
-
-                    let old_msg = &self.var_to_factor[&(var_id, factor_id)];
-                    let diff: f64 = incoming.iter().zip(old_msg.iter()).map(|(a, b)| (a - b).abs()).sum();
+                    let entry = self.var_to_factor.get_mut(&(var_id, factor_id)).unwrap();
+                    let diff: f64 = incoming.iter().zip(entry.iter()).map(|(a, b)| (a - b).abs()).sum();
                     
                     if diff > tolerance {
-                        self.var_to_factor.insert((var_id, factor_id), incoming);
-                        // Trigger updates for neighbor factors
-                        let target_factor = &self.factors[factor_id];
-                        for &v_neighbor in &target_factor.variables {
-                            if v_neighbor != var_id {
-                                queue.push_back((EdgeDirection::FactorToVar, factor_id, v_neighbor));
+                        *entry = incoming;
+                        // Schedule neighbors
+                        let factor = &self.factors[factor_id];
+                        for &n_var in &factor.variables {
+                            if n_var != var_id {
+                                queue.push_back(WorkItem::FactorToVar { factor_id, var_id: n_var });
                             }
                         }
                     }
-                },
-                EdgeDirection::FactorToVar => {
-                    let factor_id = src;
-                    let var_id = dst;
+                }
+                WorkItem::FactorToVar { factor_id, var_id } => {
+                    // Update u_{f -> x}(x) = log Sum_{...} exp(...)
                     let factor = &self.factors[factor_id];
+                    let target_idx = factor.variables.iter().position(|&x| x == var_id).unwrap();
                     
-                    if let Some(target_idx) = factor.variables.iter().position(|&x| x == var_id) {
-                         let incoming_msgs: Vec<Vec<f64>> = factor.variables.iter().map(|&v| {
-                            self.var_to_factor[&(v, factor_id)].clone()
-                        }).collect();
+                    // Collect incoming Var->Factor messages
+                    let incoming_msgs: Vec<Vec<f64>> = factor.variables.iter().map(|&v| {
+                        self.var_to_factor.get(&(v, factor_id)).cloned().unwrap_or_else(|| vec![0.0; self.domain_size])
+                    }).collect();
 
-                        let mut new_msg = vec![0.0; self.domain_size];
-                        for state in 0..self.domain_size {
-                             new_msg[state] = FactorToVarMessage::update(
-                                 factor,
-                                 target_idx,
-                                 state,
-                                 self.domain_size,
-                                 &incoming_msgs
-                             );
-                        }
-                        
-                        let lse = logsumexp(&new_msg); 
-                        for x in &mut new_msg { *x -= lse; }
+                    let mut new_msg = compute_factor_message(factor, target_idx, self.domain_size, &incoming_msgs);
+                    normalize_log_msg(&mut new_msg);
 
-                        let old_msg = &self.factor_to_var[&(factor_id, var_id)];
-                        let diff: f64 = new_msg.iter().zip(old_msg.iter()).map(|(a, b)| (a - b).abs()).sum();
+                    let entry = self.factor_to_var.get_mut(&(factor_id, var_id)).unwrap();
+                    let diff: f64 = new_msg.iter().zip(entry.iter()).map(|(a, b)| (a - b).abs()).sum();
 
-                        if diff > tolerance {
-                             self.factor_to_var.insert((factor_id, var_id), new_msg);
-                             // Trigger updates for neighbor variables
-                             if let Some(n_fids) = self.var_adj.get(&var_id) {
-                                 for &n_fid in n_fids {
-                                     if n_fid != factor_id {
-                                         queue.push_back((EdgeDirection::VarToFactor, var_id, n_fid));
-                                     }
-                                 }
-                             }
+                    if diff > tolerance {
+                        *entry = new_msg;
+                        // Schedule neighbors
+                        if let Some(neighbors) = self.var_adj.get(&var_id) {
+                            for &n_fid in neighbors {
+                                if n_fid != factor_id {
+                                    queue.push_back(WorkItem::VarToFactor { var_id, factor_id: n_fid });
+                                }
+                            }
                         }
                     }
                 }
@@ -179,112 +144,83 @@ impl FactorGraph {
         let mut marginals = Vec::with_capacity(self.num_vars);
         for v in 0..self.num_vars {
             let mut log_prob = vec![0.0; self.domain_size];
+            // Sum all incoming Factor->Var messages
             if let Some(n_fids) = self.var_adj.get(&v) {
                 for &fid in n_fids {
-                    let msg = &self.factor_to_var[&(fid, v)];
-                    for i in 0..self.domain_size {
-                        log_prob[i] += msg[i];
+                    if let Some(msg) = self.factor_to_var.get(&(fid, v)) {
+                        for i in 0..self.domain_size {
+                            log_prob[i] += msg[i];
+                        }
                     }
                 }
             }
-            let lse = logsumexp(&log_prob);
-            for val in &mut log_prob { *val -= lse; }
+            normalize_log_msg(&mut log_prob);
             marginals.push(log_prob);
         }
         marginals
     }
 }
 
-
-/// Decrements the assignment to the next valid state in the joint domain.
-/// Returns true if a valid assignment was found, false if the sequence wrapped around.
-fn next_assignment(assignment: &mut [usize], domain_size: usize, skip: usize) -> bool {
-    for (j, val) in assignment.iter_mut().enumerate() {
-        if j == skip {
-            continue;
-        }
-        *val += 1;
-
-        if *val < domain_size {
-            return true;
-        } else {
-            *val = 0;
-        }
-    }
-
-    false
+/// Normalize log-probabilities by subtracting LSE
+fn normalize_log_msg(msg: &mut [f64]) {
+    let lse = logsumexp(msg);
+    for x in msg { *x -= lse; }
 }
 
-/* */
-pub struct VarToFactorMessage;
-
-impl VarToFactorMessage {
-    // NB simple ln. sum of incoming messages from factors to this variable;
-    //    see eqn. (14.14) of Information, Physics & Computation, Mezard.
-    pub fn update(
-        var_id: usize, 
-        target_factor_id: usize, 
-        state: usize, 
-        incoming_messages: &[f64]
-    ) -> f64 {
-        incoming_messages.iter().sum()
-    }
-}
-
-pub struct FactorToVarMessage;
-
-impl FactorToVarMessage {
-    pub fn update(
-        factor: &Factor,
-        target_var_idx: usize,
-        target_state: usize,
-        domain_size: usize,
-        incoming_messages: &[Vec<f64>] // Vector of messages from each variable in factor.variables
-    ) -> f64 {
-        // Validation: incoming_messages should correspond to Factor.variables (Var -> Factor messages)
-        // assert_eq!(incoming_messages.len(), factor.variables.len());
-
-        // NB we will sum over factor assignments bar the target variable,
-        //    weighted by corresponding input variable messages.
-        //    see eqn. (14.15) of Information, Physics & Computation, Mezard.
+/// Compute outgoing message from Factor to Variable
+fn compute_factor_message(
+    factor: &Factor,
+    target_var_idx: usize, // Index in factor.variables
+    domain_size: usize,
+    incoming_messages: &[Vec<f64>]
+) -> Vec<f64> {
+    let mut messages = vec![0.0; domain_size];
+    
+    // We iterate over the state of the target variable (the one we are sending TO)
+    for target_state in 0..domain_size {
         let mut current_assignment = vec![0; factor.variables.len()];
         current_assignment[target_var_idx] = target_state;
+        
+        let mut log_terms = Vec::new();
 
-        // NB 
-        let mut log_terms = Vec::with_capacity(domain_size.pow((factor.variables.len() - 1) as u32));
-
+        // Sum over all other variables' configurations
         loop {
-            // NB compute index into factor table
+            // Compute table index (row-major)
             let mut idx = 0;
             let mut stride = 1;
-
-            // NB row-major: last index first.
             for &a in current_assignment.iter().rev() {
                 idx += a * stride;
                 stride *= domain_size;
             }
 
-            let mut term = 0.0;
-            
+            let mut term = factor.table[idx];
             for (j, msg) in incoming_messages.iter().enumerate() {
                 if j != target_var_idx {
-                    // Read message from Var (j) -> Factor
-                    // msg contains the value for the specific assignment of variable j
                     term += msg[current_assignment[j]]; 
                 }
             }
-
-            // Factor potential (log) + incoming messages (log)
-            log_terms.push(factor.table[idx] + term);
+            log_terms.push(term);
 
             if !next_assignment(&mut current_assignment, domain_size, target_var_idx) {
                 break;
             }
         }
 
-        logsumexp(&log_terms)
+        messages[target_state] = logsumexp(&log_terms);
     }
+    messages
 }
+
+fn next_assignment(assignment: &mut [usize], domain_size: usize, skip: usize) -> bool {
+    for (j, val) in assignment.iter_mut().enumerate() {
+        if j == skip { continue; }
+        *val += 1;
+        if *val < domain_size { return true; }
+        *val = 0;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

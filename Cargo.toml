@@ -69,3 +69,7 @@ overflow-checks = false
 # NB "target-cpu=arm64"; "target-cpu=native".
 [build]
 rustflags = ["-C", "target-cpu=native -Awarnings --cfg debug_statements"]
+
+[[bench]]
+name = "benchmarks"
+harness = false
