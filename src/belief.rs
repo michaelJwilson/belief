@@ -95,7 +95,7 @@ impl FactorGraph {
         marginals
     }
 
-    pub fn run_belief_propagation(&mut self, max_iters: usize, tolerance: f64, dropout_rate: f64) -> Vec<Vec<f64>>{
+    pub fn run_belief_propagation(&mut self, max_iters: usize, tolerance: f64, dropout_rate: f64, alpha: f64) -> Vec<Vec<f64>>{
         let mut queue = VecDeque::new();
 
         for factor in &self.factors {
@@ -109,13 +109,18 @@ impl FactorGraph {
         }
 
         // NB set a reasonable upper bound on iterations to prevent infinite loops in pathological cases.
-        let limit = 200_000.min(max_iters * self.factors.len().max(1) * 10).max(1000);
+        let limit = 100_000_000.min(max_iters * self.factors.len().max(1) * 10).max(1000);
         let mut iters = 0;
+
+        let mut success = 1;
 
         // NB pop one Var->Factor or Factor->Var message update to process.
         while let Some(item) = queue.pop_front() {
             iters += 1;
-            if iters > limit { break; }
+            if iters > limit { 
+                success = 0;   
+                break; 
+            }
 
             match item {
                 WorkItem::VarToFactor { var_id, factor_id } => {
@@ -143,6 +148,15 @@ impl FactorGraph {
 
                     // NB get the old message and check for update magnitude.
                     let entry = self.var_to_factor.get_mut(&(var_id, factor_id)).unwrap();
+
+                    // NB Damping (geometric mean in prob domain <=> linear in log domain)
+                    //    msg_new = alpha * incoming + (1-alpha) * old
+                    if alpha < 1.0 {
+                        for i in 0..self.domain_size {
+                            incoming[i] = alpha * incoming[i] + (1.0 - alpha) * entry[i];
+                        }
+                        normalize_log_msg(&mut incoming); // Re-normalize after damping
+                    }
 
                     // NB diff is the L1 distance between the new message and the old message. If it's above tolerance,
                     //    update & schedule neighbors.
@@ -174,8 +188,12 @@ impl FactorGraph {
 
                     let mut new_msg = vec![0.0; self.domain_size];
 
+                    // NB annealing dropout: linear decay from max_dropout_rate to 0 over limit iterations.
+                    //    rate = max_dropout * (1 - iters/limit)
+                    let current_dropout = max_dropout_rate * (1.0 - (iters as f64 / limit as f64)).max(0.0);
+
                     // NB Apply dropout if requested: pass uniform message with probability p.
-                    if self.rng.random::<f64>() >= dropout_rate {
+                    if self.rng.random::<f64>() >= current_dropout {
                         new_msg = compute_factor_message(factor, target_idx, self.domain_size, &incoming_msgs);
                     }
 
@@ -183,6 +201,15 @@ impl FactorGraph {
 
                     // NB get the old message and check for update magnitude.
                     let entry = self.factor_to_var.get_mut(&(factor_id, var_id)).unwrap();
+
+                    // NB Damping
+                    if alpha < 1.0 {
+                        for i in 0..self.domain_size {
+                            new_msg[i] = alpha * new_msg[i] + (1.0 - alpha) * entry[i];
+                        }
+                        normalize_log_msg(&mut new_msg);
+                    }
+
                     let diff: f64 = new_msg.iter().zip(entry.iter()).map(|(a, b)| (a - b).abs()).sum();
 
                     if diff > tolerance {
@@ -200,6 +227,8 @@ impl FactorGraph {
                 }
             }
         }
+
+        println!("BP terminated with success={} in {} iterations.", success, iters);
 
         self.calculate_marginals()
     }
@@ -356,6 +385,10 @@ mod tests {
         // NB exact inference is 2^N=32 configs for N=5.
         let n_states: usize = 3;
         let chain_len: usize = 10;
+        let dropout_rate = 0.0;
+
+        // NB alpha is the damping factor for message updates. 1.0 means no damping, 0.0 means full damping (retain old).
+        let alpha = 1.0;
 
         let (hmm, obs) = get_test_hmm(n_states, chain_len);
         let (prior, trans, emit) = (hmm.prior.clone(), hmm.trans.clone(), hmm.emit.clone());
@@ -384,8 +417,8 @@ mod tests {
             fg.add_factor(vec![t], emit_log, FactorType::Emission);
         }
 
-        println!("Running Belief Propagation on {}-chain", chain_len);
-        let bp_marginals_log =fg.run_belief_propagation(50, 1e-6, 0.0);
+        println!("Running Belief Propagation on {}-chain with dropout rate {}", chain_len, dropout_rate);
+        let bp_marginals_log =fg.run_belief_propagation(50, 1e-6, dropout_rate, alpha);
         
         assert_eq!(bp_marginals_log.len(), chain_len);
         
@@ -411,30 +444,28 @@ mod tests {
 
     #[test]
     fn test_tree_marginals() {
-        // Construct a small binary tree:
         let num_vars = 7;
         let n_states = 2;
 
         let tree = get_test_tree(num_vars, n_states, 42); // Seed for determinism
         let exact_marginals = tree.exact_marginals();
         
-        // 2. Factor Graph BP
         let mut fg = FactorGraph::new(num_vars, n_states);
+        let max_dropout_rate = 0.0;
+
+        // NB alpha is the damping factor for message updates. 1.0 means no damping, 0.0 means full damping (retain old).
+        let alpha = 1.0;
         
-        // Add Unary Factors from Tree
         for i in 0..num_vars {
             fg.add_factor(vec![i], tree.emissions[i].iter().map(|p| p.ln()).collect(), FactorType::Emission);
         }
-
-        // Add Pairwise Factors from Tree
         for (idx, &(u, v)) in tree.edges.iter().enumerate() {
             fg.add_factor(vec![u, v], tree.pairwise[idx].iter().map(|p| p.ln()).collect(), FactorType::Transition);
         }
 
         println!("Running Belief Propagation on Tree (Nodes={})...", num_vars);
-        let bp_marginals_log = fg.run_belief_propagation(50, 1e-6, 0.0);
+        let bp_marginals_log = fg.run_belief_propagation(50, 1e-6, max_dropout_rate, alpha);
 
-        // 3. Compare
         println!("Comparing Marginals (Exact vs BP):");
         for i in 0..num_vars {
             let m_log = &bp_marginals_log[i];
@@ -454,7 +485,6 @@ mod tests {
 
     #[test]
     fn test_hmrf_marginals() {
-        // 3x3 loopy belief propagation using Potts model
         let width = 4;
         let height = 4;
         let n_states = 2; // Binary grid
@@ -467,6 +497,10 @@ mod tests {
         let edges = &potts.edges;
 
         let mut fg = FactorGraph::new(num_vars, n_states);
+        let max_dropout_rate = 0.0;
+
+        // NB alpha is the damping factor for message updates. 1.0 means no damping, 0.0 means full damping (retain old).
+        let alpha = 1.0;
         
         for i in 0..num_vars {
             fg.add_factor(vec![i], potts.emissions[i].iter().map(|p| p.ln()).collect(), FactorType::Emission);
@@ -485,7 +519,7 @@ mod tests {
         println!("Running Loopy Belief Propagation on {}x{} grid...", width, height);
         
         // Loopy BP is approximate and iterative.
-        let bp_marginals_log = fg.run_belief_propagation(100, 1e-5, 0.0);
+        let bp_marginals_log = fg.run_belief_propagation(100, 1e-5, max_dropout_rate, alpha);
 
         // 3. Compare (Expect deviations due to loops, but should be correlated)
         let mut max_diff = 0.0;
@@ -509,4 +543,42 @@ mod tests {
         // Loopy BP is generally good but not exact. Assert reasonable closeness.
         assert!(max_diff < 0.05, "Loopy BP diverged significantly from exact marginals");
     }
+
+    #[test]
+    fn test_large_hmrf_marginals() {
+        let width = 1_000;
+        let height = 100;
+        let n_states = 2; // Binary grid
+        let coupling_prob: f64 = 0.8; 
+
+        let potts = get_test_potts(width, height, n_states, coupling_prob);
+        let num_vars = potts.num_vars();
+
+        let edges = &potts.edges;
+
+        let mut fg = FactorGraph::new(num_vars, n_states);
+
+        // NB alpha is the damping factor for message updates. 1.0 means no damping, 0.0 means full damping (retain old).
+        let alpha = 1.0;
+        let max_dropout_rate = 0.1;
+
+        for i in 0..num_vars {
+            fg.add_factor(vec![i], potts.emissions[i].iter().map(|p| p.ln()).collect(), FactorType::Emission);
+        }
+
+        let pairwise_table = [coupling_prob, 1.0 - coupling_prob, 1.0 - coupling_prob, coupling_prob];
+        let pw_log: Vec<f64> = pairwise_table.iter().map(|p| p.ln()).collect();
+
+        // NB reference count the pairwise table since it's shared across all edges for memory efficiency.
+        let pw_log_rc = Rc::new(pw_log);
+
+        for &(u, v) in edges {
+            fg.add_shared_factor(vec![u, v], pw_log_rc.clone(), FactorType::Transition);
+        }
+
+        println!("Running Loopy Belief Propagation on {}x{} grid...", width, height);
+        
+        let bp_marginals_log = fg.run_belief_propagation(100, 1e-5, max_dropout_rate, alpha);
+    }
+
 }
