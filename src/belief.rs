@@ -28,7 +28,7 @@ pub struct Factor {
     pub table: Vec<f64>,
 }
 
-/// NB Forney factor graph is with variables and factors connected by edges.
+/// NB Forney factor graph with variables and factors connected by edges.
 pub struct FactorGraph {
     pub factors: Vec<Factor>,
     pub var_adj: HashMap<usize, Vec<usize>>,
@@ -90,6 +90,7 @@ impl FactorGraph {
 
         while let Some((dir, src, dst)) = queue.pop_front() {
             iters += 1;
+
             // Break if potentially infinite loop (loopy graph) or max iters exceeded
             if iters > max_iters * factor_count * 10 && iters > 200_000 { break; }
 
@@ -214,6 +215,7 @@ fn next_assignment(assignment: &mut [usize], domain_size: usize, skip: usize) ->
     false
 }
 
+/* */
 pub struct VarToFactorMessage;
 
 impl VarToFactorMessage {
