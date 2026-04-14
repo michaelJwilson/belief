@@ -20,7 +20,7 @@ nalgebra = { version = "0.33.2" }
 ndarray = { version = ">=0.16", features = ["blas", "matrixmultiply-threading"] }
 # ndarray-linalg = { version="0.17.0", features = ["openblas"]}
 
-rand = "0.10.0"
+rand = "0.10.1"
 # rand_distr = ">0.4"
 # rand_chacha = ">0.3"
 # spectral = "0.6.0"
